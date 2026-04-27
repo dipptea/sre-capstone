@@ -6,6 +6,9 @@
 .vscode/
 *.swp
 
+# Claude Code (per-machine local settings only)
+.claude/settings.local.json
+
 # Secrets & env
 .env
 .env.*
