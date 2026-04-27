@@ -13,6 +13,9 @@ Spec-driven. Every phase begins with a spec under [specs/](specs/) that must be 
 - `/spec-new NN` — scaffold a phase spec (and updates STATUS in ROADMAP.md)
 - `/spec-check` — verify current work against the active spec, surface drift, probe comprehension
 - `/phase-close NN` — gate: walk validation, verbal + visual recall, mark spec `done`, update STATUS, commit & push
+- `/resume` — orient at the start of a fresh session (read-only summary of where you are)
+
+A PreToolUse hook (`.claude/hooks/check-spec-status.py`, registered in `.claude/settings.json`) blocks `Write`/`Edit` to infra/app code unless a spec is `approved` or `in-progress`. Doc/framework files are always allowed.
 
 ## Docs in this repo
 

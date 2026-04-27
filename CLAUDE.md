@@ -43,15 +43,36 @@ Always pause and ask before:
 - Changes to the GitHub repo's external state (visibility flip, branch protection, secrets)
 - Anything not described in the active spec's Design section
 
+## Spec lifecycle
+
+`draft` → `approved` → `in-progress` → `done`
+
+State transitions:
+- **draft → approved**: when the user explicitly says "approved" / "go" on a draft spec, flip the frontmatter `status:` to `approved`. Never flip without that explicit signal.
+- **approved → in-progress**: flip the moment implementation begins (first edit to a `.tf`, `.yaml`, source file, etc., for that phase). The PreToolUse hook will block such edits if no spec is `approved` or `in-progress`.
+- **in-progress → done**: only via `/phase-close NN`, which runs the full close gate.
+
 ## Per-phase workflow
 
 1. `/spec-new NN` to scaffold the spec
-2. Fill in Goal, Non-goals, Design, Validation, Rollback, Comprehension checkpoints
+2. Fill in Goal, Non-goals, Background, Design (all 4 sub-sections), Validation, Rollback, Comprehension checkpoints
 3. User marks `status: approved`
 4. Implement step by step, with comprehension questions at each meaningful step
 5. Run `/spec-check` periodically to verify alignment
-6. On phase close: update `runbook.md`, `lessons.md`, mark spec `done`
-7. User rehearses the 60-second verbal explanation
+6. On phase close: run `/phase-close NN` (handles runbook + lessons + ARCHITECTURE check, verbal & visual recall, status flip, commit)
+
+## Slash commands
+
+- `/spec-new NN` — scaffold a phase spec
+- `/spec-check` — verify current work against active spec, surface drift, probe comprehension
+- `/phase-close NN` — gate command; refuses to close a phase that isn't done
+- `/resume` — orient at the start of a fresh session (read-only summary of where you are)
+
+## Enforcement
+
+There is a PreToolUse hook at `.claude/hooks/check-spec-status.py` that blocks `Write`/`Edit` to infra/app code (`.tf`, `.yaml`, `.py`, `.js`, `.ts`, `.go`, `Dockerfile`, etc.) unless a spec is `approved` or `in-progress`. Doc/framework files (anything in `specs/`, `.claude/`, plus `README.md`, `CLAUDE.md`, `ROADMAP.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `runbook.md`, `lessons.md`) are always allowed.
+
+If the hook misfires, comment out the entry in `.claude/settings.json` — but first investigate why. The hook is the harness's only real enforcement of the spec-first rule.
 
 ## Anti-patterns to avoid
 

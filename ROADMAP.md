@@ -64,7 +64,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 > Per-phase **design detail** lives in `specs/phase-NN.md`, written via `/spec-new NN` right before the phase starts. The blocks below are the *learning intent* — coarse enough not to lock in design decisions, rich enough to feel grounded in the journey.
 
-### Phase 1 — Skeleton: VPC + EKS + 1 service + Datadog trace
+### Phase 1 — Hello, observable payment
 
 **Goal:** Provision VPC + EKS via Terraform, deploy a single payment service via Helm, and confirm one end-to-end Datadog trace with log correlation on a `curl` request.
 
@@ -80,7 +80,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 ---
 
-### Phase 2 — Ingress (ALB), HTTPS, second service, service-to-service trace
+### Phase 2 — Ingress and second service
 
 **Goal:** External traffic reaches the service via an ALB with HTTPS termination. A second downstream service is added so traces span service boundaries.
 
@@ -96,7 +96,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 ---
 
-### Phase 3 — CI/CD pipeline
+### Phase 3 — CI/CD pipeline (push to main → deployed)
 
 **Goal:** Push to `main` → image built → tests run → image pushed → cluster deployed, with automatic rollback if health checks fail.
 
@@ -112,7 +112,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 ---
 
-### Phase 4 — HA / scaling: HPA, PDB, probes
+### Phase 4 — HA and scaling
 
 **Goal:** HPA scales the service under load; PodDisruptionBudget prevents simultaneous evictions; readiness/liveness/startup probes detect unhealthy pods correctly.
 
@@ -128,7 +128,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 ---
 
-### Phase 5 — Failure-injection #1: pod kill, node drain, image pull fail
+### Phase 5 — Failure injection: infrastructure
 
 **Goal:** Deliberately break the system three ways. Observe each failure in Datadog, recover, and write the runbook entry from real experience.
 
@@ -144,7 +144,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 ---
 
-### Phase 6 — Failure-injection #2: DB latency, downstream slow, dependency timeout
+### Phase 6 — Failure injection: dependencies
 
 **Goal:** Inject realistic distributed-systems failures — slow DB, slow downstream service, dependency timeout. Observe trace impact and decide which failures the system should tolerate vs surface as errors.
 
@@ -160,7 +160,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 ---
 
-### Phase 7 — WAF + Datadog synthetics + alerts wired to Jira
+### Phase 7 — WAF, synthetics, alerts
 
 **Goal:** WAF rules in front of the ALB. Datadog synthetic checks running every minute against the payment endpoint. Alerts auto-create Jira tickets with runbook links.
 
@@ -176,7 +176,7 @@ Each phase ends with: updated `runbook.md`, `lessons.md` entry, updated `ARCHITE
 
 ---
 
-### Phase 8 — Deployment strategy: blue/green or canary
+### Phase 8 — Deployment strategy
 
 **Goal:** Pick one (blue/green OR canary), implement it, deliberately deploy a broken version, watch the strategy contain the blast radius.
 

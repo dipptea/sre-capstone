@@ -8,25 +8,35 @@ The user wants to start a new spec for phase $ARGUMENTS.
 Steps:
 
 1. Read `specs/_template.md` and `ROADMAP.md`.
-2. If `specs/phase-$ARGUMENTS.md` already exists, stop and ask the user whether to open it for editing or overwrite. Do not silently overwrite.
-3. Create `specs/phase-$ARGUMENTS.md` from the template. Pre-fill `phase`, `created` (today's date), and the title from ROADMAP.md if it can be inferred.
-4. Then walk the user through the spec one section at a time — **never ask for everything at once**:
-   a. Goal (1–2 sentences)
-   b. Non-goals (the "we are NOT doing X this phase" list)
-   c. Initial design sketch (rough — bullet points of what gets created/changed)
-   d. Validation checklist (how we'll know it worked)
-   e. Rollback plan
-   f. Comprehension checkpoints (what the user should be able to explain at end)
-   g. Any open questions
 
-5. After each section the user answers, write it into the file and confirm before moving on. Apply the comprehension-question rotation from CLAUDE.md if a section introduces a new concept.
+2. If `specs/phase-$ARGUMENTS.md` already exists, stop and ask the user whether to open it for editing or overwrite. Do not silently overwrite.
+
+3. Create `specs/phase-$ARGUMENTS.md` from the template. Pre-fill:
+   - `phase: $ARGUMENTS`
+   - `created:` today's date
+   - `title:` derived from the per-phase block heading in ROADMAP.md (the line `### Phase $ARGUMENTS — <title>`). If the heading isn't there or is unclear, ask the user for the title.
+
+4. Walk the user through the spec **one section at a time** — never ask for everything at once. The order matches the template:
+   1. **Goal** (1–2 sentences)
+   2. **Non-goals** (the "we are NOT doing X this phase" list — this section reduces drift more than any other)
+   3. **Background** (why this phase, what it depends on, what comes after — link to ROADMAP and prior specs)
+   4. **Design — Decisions & rationale** (prose technical approach: AWS / k8s resources, key config choices and reason for each)
+   5. **Design — Architecture** (Mermaid `flowchart` of cumulative system state at end of phase, with new components highlighted)
+   6. **Design — Request flow** (Mermaid `sequenceDiagram` of a representative request through the system)
+   7. **Design — Failure-mode notes** (per *new* component: symptom / blast radius / mitigation — this is the highest-value section for SRE muscle)
+   8. **Validation** (observable, checkable conditions — not "looks fine")
+   9. **Rollback / undo** (concrete revert steps)
+   10. **Comprehension checkpoints** (things the user should be able to explain unprompted at end of phase)
+   11. **Open questions** (must be resolved before status: approved)
+
+5. After each section the user answers, write it into the file and confirm before moving on. Apply the comprehension-question rotation from CLAUDE.md if a section introduces a new concept (especially during Design and Failure-mode notes).
 
 6. **Do not mark `status: approved`** without an explicit "approved" or "go" from the user.
 
-7. **Do not start implementation** in this command. This command produces only the spec. Implementation begins after approval, in a separate session.
+7. **Do not start implementation** in this command. This command produces only the spec.
 
 8. Update the **STATUS** section at the top of `ROADMAP.md`:
    - "Current phase" = `$ARGUMENTS — <title> (drafting spec)`
    - "Last updated" = today's date
 
-9. End by reminding the user: spec is in `draft`; review it, then say "approved" to lock it.
+9. End by reminding the user: spec is in `draft`; review it, then say "approved" to lock it. After that, the next `Write`/`Edit` to infra/app code will trigger the PreToolUse hook and bump the spec to `in-progress`.

@@ -16,11 +16,15 @@ Steps:
    - If unclear or "probably," **stop**. The phase isn't done.
    - Tick the box only when there's concrete evidence.
 
-4. Verify these docs were updated *for this phase*:
-   - `runbook.md` — has a section for this phase, written in user's own words (not pasted from Claude)
-   - `lessons.md` — has at least one entry for this phase
-   - `ARCHITECTURE.md` — diagram and last-updated line reflect new cumulative state
-   If any are missing, stop and ask the user to update before continuing.
+4. Verify these docs were updated *for this phase*. For each, read the file and check:
+   - **`runbook.md`** — has a section for this phase, written in user's own words (not pasted from Claude). If missing, stop and ask the user to write it now in their own words.
+   - **`lessons.md`** — has at least one entry for this phase. If missing, stop and prompt the user with: "what's the one thing from this phase you'd struggle to explain to a peer? write that down."
+   - **`ARCHITECTURE.md`** — diagram and "Last updated" line reflect the new cumulative state. If not updated:
+     a. Read the active spec's `Architecture (delta this phase)` section.
+     b. Show it to the user as a starting point.
+     c. Walk them through merging it into ARCHITECTURE.md's "Current state" diagram (preserving prior phases' components, adding this phase's).
+     d. Update the "Last updated" line to today's date with a one-line summary of what changed.
+     e. Confirm with the user before saving.
 
 5. **Verbal explanation gate.** Ask the user to explain — out loud, to themselves or a recorder — what was built in this phase and why each piece exists, in 60 seconds, without notes. Then ask them to type back ONE sentence summarizing it. The type-back proves the verbal happened and reinforces it.
 
