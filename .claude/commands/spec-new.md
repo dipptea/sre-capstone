@@ -1,20 +1,39 @@
 ---
 description: Scaffold a new phase spec from the template
-argument-hint: <phase-number>
+argument-hint: <phase-number> [--force]
 ---
 
 The user wants to start a new spec for phase $ARGUMENTS.
+
+**Parse $ARGUMENTS:**
+- The phase number is the first non-flag token (e.g. `01`).
+- The flag `--force` (anywhere in $ARGUMENTS) is the explicit override for the existence check.
+
+Refer to the parsed phase number as `<NN>` below.
 
 Steps:
 
 1. Read `specs/_template.md` and `ROADMAP.md`.
 
-2. If `specs/phase-$ARGUMENTS.md` already exists, stop and ask the user whether to open it for editing or overwrite. Do not silently overwrite.
+2. **Existence check — refuse to overwrite without `--force`.**
+   - If `specs/phase-<NN>.md` does **not** exist → continue to step 3.
+   - If `specs/phase-<NN>.md` **exists and `--force` was NOT passed** → STOP. Refuse. Show the user:
+     - The existing file's `status:` from the frontmatter
+     - The most recent commit that touched it (`git log --oneline -1 -- specs/phase-<NN>.md`)
+     - These three options:
+       1. Run `/resume` to orient on the in-flight phase
+       2. Edit the spec directly (Edit tool — file is always allowed by the hook)
+       3. Re-run with `/spec-new <NN> --force` to overwrite — **this loses any uncommitted spec content**
+     - Do not proceed under any circumstance without `--force`.
+   - If `specs/phase-<NN>.md` **exists and `--force` WAS passed** →
+     - Read the file. Summarize what's in it: status, which sections have content beyond the `(to be filled)` placeholder, last commit timestamp.
+     - Ask the user one final confirmation: "Confirm overwrite of phase-<NN>.md? This will replace its contents with a fresh template."
+     - Only proceed if the user explicitly says yes / confirm / overwrite. "ok" alone is insufficient — ask again.
 
-3. Create `specs/phase-$ARGUMENTS.md` from the template. Pre-fill:
-   - `phase: $ARGUMENTS`
+3. Create `specs/phase-<NN>.md` from the template. Pre-fill:
+   - `phase: <NN>`
    - `created:` today's date
-   - `title:` derived from the per-phase block heading in ROADMAP.md (the line `### Phase $ARGUMENTS — <title>`). If the heading isn't there or is unclear, ask the user for the title.
+   - `title:` derived from the per-phase block heading in ROADMAP.md (the line `### Phase <NN> — <title>`). If the heading isn't there or is unclear, ask the user for the title.
 
 4. Walk the user through the spec **one section at a time** — never ask for everything at once. The order matches the template:
    1. **Goal** (1–2 sentences)
