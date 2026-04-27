@@ -16,7 +16,9 @@ If those two goals conflict, retention wins.
    - All Validation checklist items in the spec pass
    - `runbook.md` has the operate-steps for what was built, in the user's own words
    - `lessons.md` has at least one entry for this phase
+   - `ARCHITECTURE.md` is updated to reflect the new cumulative system state
    - User can explain the phase aloud in 60 seconds without notes
+   - User can redraw the architecture diagram from memory (no peeking at the spec)
 
 ## Comprehension question rotation
 

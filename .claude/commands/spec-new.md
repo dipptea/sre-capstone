@@ -25,4 +25,8 @@ Steps:
 
 7. **Do not start implementation** in this command. This command produces only the spec. Implementation begins after approval, in a separate session.
 
-8. End by reminding the user: spec is in `draft`; review it, then say "approved" to lock it.
+8. Update the **STATUS** section at the top of `ROADMAP.md`:
+   - "Current phase" = `$ARGUMENTS — <title> (drafting spec)`
+   - "Last updated" = today's date
+
+9. End by reminding the user: spec is in `draft`; review it, then say "approved" to lock it.
