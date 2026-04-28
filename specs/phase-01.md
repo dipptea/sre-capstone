@@ -124,15 +124,51 @@ flowchart LR
 
 ### Request flow
 
-(to be filled)
+One representative `curl /pay` end-to-end. The colored rectangle marks the **dd-trace span boundary** — the part of the flow that's captured as a single span in Datadog APM. The async telemetry path is shown explicitly so the NAT dependency is visible in the spec, not just in chat history.
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant A as Service
-    U->>A: request
-    A-->>U: response
+    autonumber
+    participant Dev as Developer<br/>(laptop)
+    participant API as EKS API server<br/>(public endpoint)
+    participant Pod as payment-service pod<br/>(FastAPI + dd-trace)
+    participant DD as Datadog agent<br/>(DaemonSet, same node)
+    participant NAT as NAT GW
+    participant SaaS as Datadog SaaS
+
+    Dev->>API: kubectl port-forward svc/payment 8080:80
+    Note over Dev,API: HTTPS tunnel stays open
+
+    Dev->>API: curl http://localhost:8080/pay → tunneled
+    API->>Pod: TCP to pod port 80
+
+    rect rgb(220, 240, 220)
+    Note over Pod: dd-trace span begins: POST /pay
+    Pod->>Pod: handle request, synthesize payment_id
+    Pod->>Pod: emit JSON log line with trace_id
+    Pod->>DD: ship span via localhost:8126
+    Note over Pod: span ends; return 200
+    end
+
+    Pod-->>API: 200 + payment_id
+    API-->>Dev: 200 visible in curl output
+
+    Note over DD,SaaS: Async — parallel to response, NOT on the request path
+    DD->>NAT: batched HTTPS to api.datadoghq.com
+    NAT->>SaaS: outbound (NAT-translated)
+    SaaS-->>NAT: ack
+    NAT-->>DD: delivered
+
+    Note over Dev,SaaS: ⚠ If NAT dies mid-flight: curl still returns 200, but the<br/>trace never reaches Datadog SaaS. Pod logs scraped by the<br/>agent also stop shipping. The system works; observability lies.
 ```
+
+**Reading the sequence:**
+
+1. **Steps 1–2** (port-forward setup, then curl). The user-facing path uses the **public EKS API server endpoint**, not the VPC's NAT GW. This is why `kubectl port-forward` is NAT-independent.
+2. **Green span box** — everything inside this rectangle is one Datadog APM trace span. `dd-trace` instrumentation in the FastAPI process generates the span ID, stamps it onto the JSON log line emitted to stdout, and ships the span to the local-node Datadog agent over loopback (`localhost:8126`). All synchronous; no NAT involved.
+3. **Pod → response** — the response leaves the pod and travels back the same tunnel to the laptop. The user sees a 200 in their terminal regardless of what happens next.
+4. **Async telemetry** (the section *after* the response is delivered). The Datadog agent batches traces + logs + metrics, then ships to `api.datadoghq.com` over HTTPS. **This is the only step that uses the NAT GW.**
+5. **Failure-mode call-out** — if the NAT dies, the user-visible request is unaffected, but Datadog SaaS goes silent. This is the partial-observability failure mode that Phase 5's NAT drill will demonstrate live.
 
 ### Implementation outline
 
