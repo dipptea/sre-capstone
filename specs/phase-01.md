@@ -43,16 +43,84 @@ VS Code is the editor; not a dependency.
 
 ### Decisions & rationale
 
-(to be filled)
+**Infrastructure (Terraform):**
+
+- **VPC** via official `terraform-aws-modules/vpc/aws` module — `10.0.0.0/16` CIDR, 2 AZs (`us-east-1a` + `us-east-1b`), public + private subnets per AZ. Reason: official modules are what real P-SRE work modifies; reinventing eats a week (logged in [../DECISIONS.md](../DECISIONS.md)).
+- **1 shared NAT Gateway** in a public subnet for both AZs' private-subnet egress (~$33/mo). Phase 5 will add a 2nd NAT GW per AZ as part of the failure-injection drill — run the NAT-down scenario with the shared NAT first (observe full egress collapse), then upgrade and rerun (observe AZ-isolated failure). Cross-phase decision logged in [../DECISIONS.md](../DECISIONS.md).
+- **IGW** on the VPC; public route table → IGW; private route tables → NAT GW.
+- **EKS** via official `terraform-aws-modules/eks/aws` module. Managed node group with **2× t3.medium** on-demand instances, default 20 GB gp3 root volume each. Workers in private subnets (egress via NAT). Control plane endpoint public for now (private-only is a later phase).
+
+**Application:**
+
+- Single payment service in **Python** (FastAPI — small, fast to write, good Datadog tracer support). One `POST /pay` endpoint, returns 200 with a synthetic payment ID. Structured JSON logs with `trace_id` field for correlation.
+- **Hand-written Helm chart** (not generator-scaffolded). Goal: learn what a chart actually contains. Includes Deployment, Service, ServiceAccount, ConfigMap.
+- Container image built locally → pushed to ECR. **Image tag = git short SHA** (immutable). Mutable tags like `latest`/`main` are explicitly avoided — Phase 3 covers why.
+- Manual deploy via `helm upgrade --install` from the laptop. CI/CD is Phase 3.
+
+**Observability (Datadog):**
+
+- Datadog agent installed via the official Datadog Helm chart, running as a **DaemonSet** so every node ships node + pod + container metrics + logs + traces.
+- Datadog API key in a manually-created Kubernetes Secret. (Sealed Secrets / External Secrets is a later phase.)
+- APM enabled; service tagged `payment-service`. Log correlation via Datadog's standard `dd.trace_id` injection in the JSON logs emitted by the service.
+
+**Access pattern (Phase 1 only):**
+
+- No public hostname. Reach the service via `kubectl port-forward svc/payment 8080:80` from your laptop, then `curl http://localhost:8080/pay`. ALB Ingress + ACM/HTTPS is Phase 2.
 
 ### Architecture (delta this phase)
 
-(to be filled)
+All components shown are new this phase — Phase 01 is the foundation; the system is empty before this phase.
 
 ```mermaid
 flowchart LR
-    A[component] --> B[component]
+    dev[Developer<br/>laptop]
+
+    subgraph aws["AWS · us-east-1"]
+        igw[Internet Gateway]
+        ecr[(ECR repo<br/>payment-service:GIT_SHA)]
+
+        subgraph vpc["VPC 10.0.0.0/16"]
+            nat[NAT Gateway<br/>shared · AZ-a public subnet]
+
+            subgraph eks["EKS cluster"]
+                direction TB
+                subgraph aza["AZ-a private subnet"]
+                    node1["Worker node 1<br/>t3.medium EC2"]
+                    ebs1[("EBS root vol<br/>20 GB gp3")]
+                    pod["payment-service pod<br/>FastAPI + dd-trace"]
+                    ddA[Datadog agent pod<br/>DaemonSet]
+                    node1 --- ebs1
+                    node1 --- pod
+                    node1 --- ddA
+                end
+                subgraph azb["AZ-b private subnet"]
+                    node2["Worker node 2<br/>t3.medium EC2"]
+                    ebs2[("EBS root vol<br/>20 GB gp3")]
+                    ddB[Datadog agent pod<br/>DaemonSet]
+                    node2 --- ebs2
+                    node2 --- ddB
+                end
+            end
+        end
+    end
+
+    ddsaas[(Datadog SaaS<br/>APM + Logs + Metrics)]
+
+    dev -->|"kubectl port-forward<br/>then curl /pay"| pod
+    pod -->|"trace + correlated logs<br/>via localhost:8126"| ddA
+    ddA -->|"HTTPS via NAT GW"| ddsaas
+    ddB -->|"HTTPS via NAT GW"| ddsaas
+    pod -.->|"image pull on deploy"| ecr
+    nat --> igw
 ```
+
+**Reading the diagram:**
+
+1. **Request path** (solid arrow from laptop): `kubectl port-forward` opens a tunnel from the laptop to the pod via the cluster API server. There is no public hostname this phase — Phase 2 adds the ALB.
+2. **Trace + log flow**: the pod ships traces and structured JSON logs to the **local-node** Datadog agent (DaemonSet pod listening on `localhost:8126`). The agent then ships everything to Datadog SaaS over HTTPS, egressing through the shared NAT GW.
+3. **Cluster topology**: 2 AZs of private subnets, one `t3.medium` worker node per AZ, each with a 20 GB gp3 EBS root volume. The Datadog agent runs on every node because it's a DaemonSet — that's how it picks up node-level metrics (cAdvisor, kubelet) and pod logs from the local container runtime.
+4. **Egress path** (any solid arrow leaving the VPC to the right): all internet-bound traffic from private subnets traverses the NAT GW → IGW → public internet. This includes Datadog telemetry. There is exactly one shared NAT GW in Phase 1; Phase 5 will add a 2nd.
+5. **Image pull** (dashed): only happens during `helm upgrade --install` when nodes pull the payment-service image from ECR. After deploy, no more ECR traffic.
 
 ### Request flow
 
