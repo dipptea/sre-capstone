@@ -2,7 +2,7 @@
 
 ## STATUS
 
-- **Current phase:** 01 — Skeleton (drafting spec)
+- **Current phase:** 01 — Hello, observable payment (not yet started — run `/spec-new 01` to begin)
 - **Last completed phase:** —
 - **Last updated:** 2026-04-27
 
