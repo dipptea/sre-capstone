@@ -71,91 +71,113 @@ VS Code is the editor; not a dependency.
 
 All components shown are new this phase — Phase 01 is the foundation; the system is empty before this phase.
 
+> **Glossary** (for reading the diagram):
+> - **EKS cluster** = control plane (AWS-managed, lives in AWS's account) + data plane (your worker nodes, in your VPC). Two halves with very different ownership.
+> - **EKS API server endpoint** = the public DNS name your `kubectl` actually talks to. AWS-managed NLB in front of AWS-run API server processes.
+> - **Worker node** = an EC2 instance running `kubelet` + container runtime. Pods get scheduled onto nodes.
+> - **Pod** = smallest deploy unit; one or more containers sharing a network namespace, scheduled onto a node.
+> - **DaemonSet** = a Kubernetes workload type that runs one pod *per node* (used here for the Datadog agent so every node ships telemetry).
+
 ```mermaid
 flowchart LR
-    dev[Developer<br/>laptop]
+    dev["💻 Developer laptop<br/>kubectl + curl"]
 
-    subgraph aws["AWS · us-east-1"]
-        igw[Internet Gateway]
-        ecr[(ECR repo<br/>payment-service:GIT_SHA)]
+    subgraph awsregion["☁️ AWS · us-east-1"]
 
-        subgraph vpc["VPC 10.0.0.0/16"]
-            nat[NAT Gateway<br/>shared · AZ-a public subnet]
+        subgraph ekscp["EKS Control Plane — AWS-managed, NOT in your VPC"]
+            api["EKS API Server endpoint<br/>public DNS via AWS-managed NLB<br/>e.g. XXXXX.gr7.us-east-1.eks.amazonaws.com"]
+        end
 
-            subgraph eks["EKS cluster"]
-                direction TB
-                subgraph aza["AZ-a private subnet"]
-                    node1["Worker node 1<br/>t3.medium EC2"]
+        subgraph yourvpc["Your VPC · 10.0.0.0/16"]
+            igw["Internet Gateway"]
+            nat["NAT Gateway<br/>shared · AZ-a public subnet"]
+
+            subgraph eksdp["EKS Data Plane — your worker nodes, in your VPC"]
+                subgraph aza["AZ-a · private subnet"]
+                    node1["Worker node 1<br/>t3.medium EC2 · runs kubelet"]
                     ebs1[("EBS root vol<br/>20 GB gp3")]
                     pod["payment-service pod<br/>FastAPI + dd-trace"]
-                    ddA[Datadog agent pod<br/>DaemonSet]
+                    ddA["Datadog agent pod<br/>(DaemonSet)"]
                     node1 --- ebs1
                     node1 --- pod
                     node1 --- ddA
                 end
-                subgraph azb["AZ-b private subnet"]
-                    node2["Worker node 2<br/>t3.medium EC2"]
+                subgraph azb["AZ-b · private subnet"]
+                    node2["Worker node 2<br/>t3.medium EC2 · runs kubelet"]
                     ebs2[("EBS root vol<br/>20 GB gp3")]
-                    ddB[Datadog agent pod<br/>DaemonSet]
+                    ddB["Datadog agent pod<br/>(DaemonSet)"]
                     node2 --- ebs2
                     node2 --- ddB
                 end
             end
         end
+
+        ecr[("ECR repo<br/>payment-service:GIT_SHA")]
     end
 
-    ddsaas[(Datadog SaaS<br/>APM + Logs + Metrics)]
+    ddsaas[("Datadog SaaS<br/>APM + Logs + Metrics")]
 
-    dev -->|"kubectl port-forward<br/>then curl /pay"| pod
-    pod -->|"trace + correlated logs<br/>via localhost:8126"| ddA
-    ddA -->|"HTTPS via NAT GW"| ddsaas
-    ddB -->|"HTTPS via NAT GW"| ddsaas
-    pod -.->|"image pull on deploy"| ecr
+    dev ==>|"① kubectl HTTPS<br/>(port-forward)"| api
+    api ==>|"② tunnel via kubelet<br/>to pod port 80"| pod
+    pod -->|"③ trace + log<br/>localhost:8126"| ddA
+    ddA -->|"④ HTTPS to Datadog"| nat
+    ddB --> nat
     nat --> igw
+    igw --> ddsaas
+    node1 -.->|"image pull<br/>deploy time only"| nat
+    nat -.-> ecr
 ```
 
-**Reading the diagram:**
+**Reading the diagram — follow the numbered arrows ① → ② → ③ → ④ for one `curl /pay`:**
 
-1. **Request path** (solid arrow from laptop): `kubectl port-forward` opens a tunnel from the laptop to the pod via the cluster API server. There is no public hostname this phase — Phase 2 adds the ALB.
-2. **Trace + log flow**: the pod ships traces and structured JSON logs to the **local-node** Datadog agent (DaemonSet pod listening on `localhost:8126`). The agent then ships everything to Datadog SaaS over HTTPS, egressing through the shared NAT GW.
-3. **Cluster topology**: 2 AZs of private subnets, one `t3.medium` worker node per AZ, each with a 20 GB gp3 EBS root volume. The Datadog agent runs on every node because it's a DaemonSet — that's how it picks up node-level metrics (cAdvisor, kubelet) and pod logs from the local container runtime.
-4. **Egress path** (any solid arrow leaving the VPC to the right): all internet-bound traffic from private subnets traverses the NAT GW → IGW → public internet. This includes Datadog telemetry. There is exactly one shared NAT GW in Phase 1; Phase 5 will add a 2nd.
-5. **Image pull** (dashed): only happens during `helm upgrade --install` when nodes pull the payment-service image from ECR. After deploy, no more ECR traffic.
+- **① + ② — Request path (NAT-independent).** Your laptop's `kubectl port-forward` opens an HTTPS connection to the **EKS API Server endpoint** — the public AWS-managed NLB that lives in AWS's *control-plane account*, **not your VPC**. The API server tunnels through to the **kubelet** on the pod's node, which forwards traffic to the pod's port 80. Notice: this path crosses **neither** the Internet Gateway **nor** the NAT GW. The request enters through the control-plane side door, not the VPC's data-plane front door.
+- **③ — Trace + log to local Datadog agent (loopback).** The pod ships its trace span and structured JSON log line to the Datadog agent running on the *same node*, via `localhost:8126`. This stays *inside* the node — never crosses the network.
+- **④ — Egress to Datadog SaaS (NAT-dependent).** The Datadog agent batches telemetry and ships it over HTTPS to `api.datadoghq.com`. **This is the only step that uses the NAT GW.** If NAT dies, this arrow goes dark — but ①, ②, and ③ keep working, so `curl` still returns 200 while Datadog SaaS goes silent. *(That's the lesson Phase 5's NAT drill will demonstrate live.)*
+- **Image pull (dashed)** — happens only during `helm upgrade --install` when the kubelet pulls the payment-service image from ECR. Goes via NAT.
+
+**Why the control-plane / data-plane split matters:**
+
+The control plane (the `EKS Control Plane` subgraph) is not yours to operate. AWS runs the API server, etcd, scheduler, and controller-manager in *their own account* — you can't SSH into them, can't see their logs, can't tune their flags. You pay $0.10/hour for the privilege of *not* having to. The data plane (your VPC, the `EKS Data Plane` subgraph) is what you own — your worker nodes, your pods, your network. **This separation is also why a NAT GW outage doesn't take down `kubectl`** — the API server doesn't use your NAT.
 
 ### Request flow
 
-One representative `curl /pay` end-to-end. The colored rectangle marks the **dd-trace span boundary** — the part of the flow that's captured as a single span in Datadog APM. The async telemetry path is shown explicitly so the NAT dependency is visible in the spec, not just in chat history.
+One representative `curl /pay` end-to-end, with **every hop made explicit** (especially the kubelet, which lives between the API server and the pod). The green rectangle marks the **dd-trace span boundary** — the part of the flow captured as a single span in Datadog APM. The async telemetry path is shown explicitly so the NAT dependency is visible in the spec, not just in chat history.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Dev as Developer<br/>(laptop)
-    participant API as EKS API server<br/>(public endpoint)
+    participant Dev as 💻 Developer<br/>(laptop)
+    participant API as EKS API Server<br/>(public endpoint, AWS-managed)
+    participant Kube as kubelet<br/>(on the pod's node)
     participant Pod as payment-service pod<br/>(FastAPI + dd-trace)
     participant DD as Datadog agent<br/>(DaemonSet, same node)
     participant NAT as NAT GW
     participant SaaS as Datadog SaaS
 
-    Dev->>API: kubectl port-forward svc/payment 8080:80
-    Note over Dev,API: HTTPS tunnel stays open
+    Note over Dev,Kube: Setup — one-time per port-forward session
+    Dev->>API: kubectl port-forward svc/payment 8080:80<br/>(HTTPS, IAM-signed)
+    API->>Kube: control-plane msg: open tunnel to pod port 80
 
-    Dev->>API: curl http://localhost:8080/pay → tunneled
-    API->>Pod: TCP to pod port 80
+    Note over Dev,Pod: Synchronous request path — NAT-independent
+    Dev->>API: curl http://localhost:8080/pay (tunneled)
+    API->>Kube: tunneled TCP, framed in the existing HTTPS connection
+    Kube->>Pod: forward to container port 80
 
     rect rgb(220, 240, 220)
     Note over Pod: dd-trace span begins: POST /pay
     Pod->>Pod: handle request, synthesize payment_id
     Pod->>Pod: emit JSON log line with trace_id
-    Pod->>DD: ship span via localhost:8126
+    Pod->>DD: ship span via localhost:8126 (loopback, never leaves the node)
     Note over Pod: span ends; return 200
     end
 
-    Pod-->>API: 200 + payment_id
+    Pod-->>Kube: 200 + payment_id
+    Kube-->>API: response via tunnel
     API-->>Dev: 200 visible in curl output
 
-    Note over DD,SaaS: Async — parallel to response, NOT on the request path
-    DD->>NAT: batched HTTPS to api.datadoghq.com
-    NAT->>SaaS: outbound (NAT-translated)
+    Note over DD,SaaS: Async path — parallel to response, NAT-dependent
+    DD->>NAT: batched HTTPS to api.datadoghq.com (egress from private subnet)
+    NAT->>SaaS: outbound (NAT-translated, via IGW)
     SaaS-->>NAT: ack
     NAT-->>DD: delivered
 
@@ -164,11 +186,12 @@ sequenceDiagram
 
 **Reading the sequence:**
 
-1. **Steps 1–2** (port-forward setup, then curl). The user-facing path uses the **public EKS API server endpoint**, not the VPC's NAT GW. This is why `kubectl port-forward` is NAT-independent.
-2. **Green span box** — everything inside this rectangle is one Datadog APM trace span. `dd-trace` instrumentation in the FastAPI process generates the span ID, stamps it onto the JSON log line emitted to stdout, and ships the span to the local-node Datadog agent over loopback (`localhost:8126`). All synchronous; no NAT involved.
-3. **Pod → response** — the response leaves the pod and travels back the same tunnel to the laptop. The user sees a 200 in their terminal regardless of what happens next.
-4. **Async telemetry** (the section *after* the response is delivered). The Datadog agent batches traces + logs + metrics, then ships to `api.datadoghq.com` over HTTPS. **This is the only step that uses the NAT GW.**
-5. **Failure-mode call-out** — if the NAT dies, the user-visible request is unaffected, but Datadog SaaS goes silent. This is the partial-observability failure mode that Phase 5's NAT drill will demonstrate live.
+1. **Steps 1–2 — Setup.** `kubectl port-forward` is a control-plane operation: it goes from your laptop → public EKS API Server endpoint → kubelet on the pod's node, asking the kubelet to open a tunnel. Your VPC's data-plane network (subnets, NAT, IGW) is not involved.
+2. **Steps 3–5 — Request enters the pod.** The actual `curl` traffic flows through that same tunnel: `Dev → API server → kubelet → Pod`. Three hops, all of them control-plane-side. Still no NAT.
+3. **Green span rectangle (steps 6–9).** Everything inside is one Datadog APM trace span. `dd-trace` instrumentation in FastAPI generates the span ID, stamps it onto the JSON log line, and ships the span to the local-node Datadog agent over **loopback** (`localhost:8126`) — that traffic never even leaves the worker node, let alone uses the network.
+4. **Steps 10–12 — Response returns.** Same tunnel, reverse direction. User sees a 200.
+5. **Steps 13–16 — Async egress (the only NAT-using part).** The Datadog agent batches telemetry, then ships HTTPS to `api.datadoghq.com`. This is **the only step in the whole sequence that uses the NAT GW.**
+6. **Failure-mode call-out (final note).** If NAT dies, the user-visible request is unaffected — but Datadog SaaS goes silent. The system works; observability lies. This is the partial-observability failure mode that Phase 5's NAT drill will demonstrate live.
 
 ### Implementation outline
 
