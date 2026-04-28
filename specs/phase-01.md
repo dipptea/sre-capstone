@@ -25,7 +25,19 @@ If we find ourselves reaching for any of these in Phase 01, stop — it's drift,
 
 ## Background
 
-(to be filled)
+Phase 01 establishes the **observability pipeline** that every later phase depends on. The end-state isn't "a cluster" — it's a `curl` request whose Datadog APM trace correlates to a log line via a shared `trace_id`. Without that visibility in place, every later debugging exercise (failure injection, scaling validation, deploy strategies) is guesswork. You can't debug what you can't see.
+
+**Depends on (external, must exist before `terraform apply`):**
+
+- AWS account with billing enabled + budget alarm ($200 soft / $500 hard — see [../INVENTORY.md](../INVENTORY.md))
+- Datadog trial (agent + APM + log correlation)
+- GitHub repo for code
+- Jira free tier (not used until Phase 7, but set up now to avoid the context switch later)
+- Local tooling: `aws`, `kubectl`, `helm`, `terraform`, `docker`
+
+VS Code is the editor; not a dependency.
+
+**What comes after:** Phase 02 inherits the cluster, the payment service, `kubectl` access, and the trace pipeline — and adds external access on top (ALB Ingress, ACM/HTTPS termination, a second service so traces span service boundaries). The full dependency chain is laid out in [../ROADMAP.md](../ROADMAP.md): observability → external access → CI/CD → HA/scaling → failure injection → WAF/alerts → deploy strategy. Every later phase **adds** on top of this foundation; none rebuild it.
 
 ## Design
 
