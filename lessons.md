@@ -1,4 +1,4 @@
-# Lessons
+# Lessons ####
 
 What stuck, what surprised me, what I'd do differently. Written in own words — this is the document that makes the learning *retrievable* later.
 
