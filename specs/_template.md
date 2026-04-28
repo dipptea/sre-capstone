@@ -1,8 +1,11 @@
 ---
 phase: NN
 title: <short title>
-status: draft  # draft | approved | in-progress | done
+status: draft  # draft | approved | in-progress | blocked | done | abandoned
 created: YYYY-MM-DD
+# Optional fields, used by the framework when relevant:
+# blocker: "<what is needed to unblock — only set when status is blocked>"
+# abandoned_reason: "<one line — only set when status is abandoned>"
 ---
 
 # Phase NN — <title>
@@ -50,6 +53,16 @@ sequenceDiagram
     U->>A: request
     A-->>U: response
 ```
+
+### Implementation outline
+
+The order in which we'll build this phase. 4–8 milestones — implementation chunks, not commands. Each milestone is a natural pause point for a comprehension question and a verification step.
+
+Keep this at the **milestone** level, not the **command** level. Specific `terraform` / `kubectl` invocations belong in chat during execution; they rot if frozen here.
+
+1. <milestone — what gets built or wired up>
+2. <milestone>
+3. <milestone>
 
 ### Failure-mode notes
 

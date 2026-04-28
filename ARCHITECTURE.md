@@ -19,12 +19,7 @@ _No live request flow yet — Phase 1 introduces the first one._
 
 ## How this is maintained
 
-At phase close (alongside `runbook.md` and `lessons.md` updates):
-
-1. Update the architecture diagram above to reflect the new cumulative end-state.
-2. Update the request flow if it changed.
-3. Update the "Last updated" line.
-4. Commit alongside the rest of the phase-close work.
+Maintenance rules live in [`CLAUDE.md`](CLAUDE.md) (hard rule #4 + `/phase-close` flow). This file is updated at phase close — see CLAUDE.md for the full list of phase-close gates.
 
 ## Last updated
 

@@ -2,11 +2,13 @@
 
 Operational reference. Grown as the system grows. Written in own words — copy-pasted commands without context don't help in an incident.
 
+> **Looking for "what's currently running and what it costs"?** That lives in [`INVENTORY.md`](INVENTORY.md), not here. This file is *how to operate*; INVENTORY is *what is provisioned*.
+
 Sections to fill in as we go:
 
 ## Deploy from zero
 
-_(Phase 1 — to be written after the first cluster is up)_
+_(Phase 1 — to be written after the first cluster is up. Should describe how a fresh engineer would bring the system up from an empty AWS account, in your own words.)_
 
 ## Common operations
 

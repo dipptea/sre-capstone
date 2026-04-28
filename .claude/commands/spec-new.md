@@ -42,11 +42,12 @@ Steps:
    4. **Design — Decisions & rationale** (prose technical approach: AWS / k8s resources, key config choices and reason for each)
    5. **Design — Architecture** (Mermaid `flowchart` of cumulative system state at end of phase, with new components highlighted)
    6. **Design — Request flow** (Mermaid `sequenceDiagram` of a representative request through the system)
-   7. **Design — Failure-mode notes** (per *new* component: symptom / blast radius / mitigation — this is the highest-value section for SRE muscle)
-   8. **Validation** (observable, checkable conditions — not "looks fine")
-   9. **Rollback / undo** (concrete revert steps)
-   10. **Comprehension checkpoints** (things the user should be able to explain unprompted at end of phase)
-   11. **Open questions** (must be resolved before status: approved)
+   7. **Design — Implementation outline** (4–8 milestones in build order — milestone-level, not command-level. Each milestone is a natural pause point for a comprehension question and a verification step.)
+   8. **Design — Failure-mode notes** (per *new* component: symptom / blast radius / mitigation — this is the highest-value section for SRE muscle)
+   9. **Validation** (observable, checkable conditions — not "looks fine")
+   10. **Rollback / undo** (concrete revert steps)
+   11. **Comprehension checkpoints** (things the user should be able to explain unprompted at end of phase)
+   12. **Open questions** (must be resolved before status: approved)
 
 5. After each section the user answers, write it into the file and confirm before moving on. Apply the comprehension-question rotation from CLAUDE.md if a section introduces a new concept (especially during Design and Failure-mode notes).
 
@@ -59,3 +60,5 @@ Steps:
    - "Last updated" = today's date
 
 9. End by reminding the user: spec is in `draft`; review it, then say "approved" to lock it. After that, the next `Write`/`Edit` to infra/app code will trigger the PreToolUse hook and bump the spec to `in-progress`.
+
+10. If the user later needs to **pause** this phase (waiting on something out-of-band), guide them to set `status: blocked` and add a `blocker:` line in frontmatter — `/resume` will surface that next session. If they decide to **abandon** the phase entirely, set `status: abandoned`, add an `abandoned_reason:` line, and append a final entry to the Decision log explaining why. The file stays in `specs/` as historical record.

@@ -2,9 +2,9 @@
 
 ## STATUS
 
-- **Current phase:** 01 — Hello, observable payment (not yet started — run `/spec-new 01` to begin)
+- **Current phase:** 01 — Hello, observable payment (drafting spec)
 - **Last completed phase:** —
-- **Last updated:** 2026-04-27
+- **Last updated:** 2026-04-28
 
 _This section is updated by `/spec-new` and `/phase-close`. Manual edits are fine._
 

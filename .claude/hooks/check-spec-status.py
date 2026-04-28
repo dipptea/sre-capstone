@@ -40,9 +40,10 @@ ALWAYS_ALLOW_BASENAMES = {
     "ROADMAP.md",
     "ARCHITECTURE.md",
     "DECISIONS.md",
+    "INVENTORY.md",
     "runbook.md",
     "lessons.md",
-    "PHASE-01.md",
+    "scratch.md",
     ".gitignore",
 }
 ALWAYS_ALLOW_PATH_FRAGMENTS = (
@@ -53,6 +54,26 @@ ALWAYS_ALLOW_PATH_FRAGMENTS = (
 
 basename = os.path.basename(file_path)
 norm_path = "/" + file_path.lstrip("/")
+
+# --- 3a. Refuse phase-shaped filenames outside specs/ ---
+# Phase specs must live in specs/phase-NN.md. Anything matching the phase
+# naming pattern outside specs/ is rejected so a stray PHASE-01.md or
+# phase-2.md at the root can't drift away from the framework.
+PHASE_FILENAME_RE = re.compile(r"^phase-?\d+\.md$", re.IGNORECASE)
+if PHASE_FILENAME_RE.match(basename) and "/specs/" not in norm_path:
+    msg = (
+        "BLOCKED: phase spec files must live under specs/.\n"
+        f"\n"
+        f"  File: {file_path}\n"
+        f"  Reason: this filename looks like a phase spec but is not in specs/.\n"
+        f"          The framework only recognizes specs at specs/phase-NN.md.\n"
+        f"\n"
+        f"What to do:\n"
+        f"  1. Run /spec-new <NN> to scaffold a phase spec correctly under specs/.\n"
+        f"  2. Or move it: mv \"{basename}\" \"specs/{basename.lower()}\"\n"
+    )
+    print(msg, file=sys.stderr)
+    sys.exit(2)
 
 if basename in ALWAYS_ALLOW_BASENAMES:
     sys.exit(0)
