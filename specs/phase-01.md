@@ -1,7 +1,7 @@
 ---
 phase: 01
 title: Hello, observable payment
-status: draft  # draft | approved | in-progress | blocked | done | abandoned
+status: approved  # draft | approved | in-progress | blocked | done | abandoned
 created: 2026-04-28
 ---
 
@@ -218,29 +218,70 @@ sequenceDiagram
 
 ### Failure-mode notes
 
-(to be filled)
+For each new component in Phase 1, the first observable symptom / blast radius / mitigation. Tight version; the deep failure-analysis muscle gets built via the Phase 5–6 drills.
+
+- **NAT Gateway** (single, shared, in AZ-a public subnet): *Symptom* = Datadog SaaS goes silent + new pod scheduling fails with `ImagePullBackOff`. *Blast radius* = all private-subnet egress dies. **`kubectl` and `curl /pay` keep working** (control-plane path, doesn't traverse NAT). *Mitigation* = `terraform apply -replace='module.vpc.aws_nat_gateway.this[0]'` (~5 min). Single point of failure until Phase 5 stages a 2nd.
+- **Internet Gateway**: *Symptom* = same as NAT death (NAT depends on IGW). *Blast radius* = wider than NAT — also kills any direct public-subnet egress. *Mitigation* = recreate via Terraform; AWS-managed and rarely fails.
+- **EKS Control Plane** (AWS-managed): *Symptom* = `kubectl` commands time out. *Blast radius* = all cluster ops blocked, but **already-running pods keep serving traffic** (data plane is independent). Auto-recovery (HPA, node-group repair) stops. *Mitigation* = AWS's problem to recover; subscribe to EKS health alerts in CloudWatch; multi-region is the only structural fix (stretch phase).
+- **Worker node** (t3.medium EC2): *Symptom* = pods on it go `NodeLost` / `Unknown`. *Blast radius* = that node's pods only; with 1 replica of payment-service, service is **down ~30–60s** while pod reschedules. *Mitigation* = managed node group auto-replaces dead nodes (5–10 min). For uptime: replicas ≥2 + PodDisruptionBudget (Phase 4).
+- **EBS root volume** (20 GB gp3 per node): *Symptom* = node `NotReady` or pods crash with disk I/O errors. **Phase 1's likely real failure: disk full from accumulated logs.** *Blast radius* = that node's pods. *Mitigation* = configure log rotation; set a Datadog disk-usage alert at 75%.
+- **payment-service pod** (single replica): *Symptom* = `curl /pay` returns `connection refused` or `5xx`; `kubectl get pods` shows `CrashLoopBackOff`. *Blast radius* = service fully down. *Mitigation* = `kubectl logs --previous payment-xxx`; common Phase 1 root causes: bad Datadog API key, bad ConfigMap reference, dd-trace init failing.
+- **Datadog agent pod** (DaemonSet): *Symptom* = node shows "agent not reporting" in Datadog Infrastructure UI. *Blast radius* = visibility into one node's pods is gone; **application traffic unaffected**. *Mitigation* = DaemonSet automatically restarts the crashed pod; set "agent down" alert in Datadog. Common cause on small nodes: OOM kill — agent needs ~300 MB.
+- **ECR**: *Symptom* = new pod scheduling fails with `ImagePullBackOff`. *Blast radius* = can't deploy or scale; existing pods keep running. *Mitigation* = check the node group's IAM role has `AmazonEC2ContainerRegistryReadOnly`; check NAT GW health (egress required to reach ECR's public endpoint).
+- **Datadog SaaS**: *Symptom* = dashboards show "no data" or stale metrics. *Blast radius* = total visibility loss; system works fine underneath. **This is the "system works; observability lies" failure mode.** *Mitigation* = subscribe to Datadog status page; have a backup debug path (`kubectl logs`, `kubectl describe`); never confuse "no incidents in Datadog" with "no problems in production" during a Datadog outage.
 
 ## Validation
 
-(to be filled)
+Phase 1 is **done** when ALL of the following are true. Items are observable conditions, not gut checks. The Milestone 7 verification doubles as the headline test.
 
-- [ ] ...
+- [ ] `aws sts get-caller-identity --profile capstone-admin` returns an **assumed-role** ARN (proves no long-lived IAM keys are in use)
+- [ ] `terraform plan` shows zero pending changes (Terraform state matches reality)
+- [ ] `kubectl get nodes` shows 2 nodes in `Ready` state
+- [ ] `kubectl get ds -n datadog` shows the Datadog agent on both nodes (`READY 2/2`)
+- [ ] Datadog Infrastructure UI shows the cluster within ~5 min of agent install; node CPU/memory metrics are flowing
+- [ ] `kubectl get pods -n payment` shows the payment-service pod `Running` and `1/1 Ready`
+- [ ] `curl http://localhost:8080/pay` (after `kubectl port-forward`) returns `200` with a synthetic `payment_id`
+- [ ] That curl appears as a span in Datadog APM tagged `service:payment-service`
+- [ ] Clicking the span in Datadog reveals the correlated pod log line containing the same `trace_id` value
+- [ ] [../INVENTORY.md](../INVENTORY.md) updated with the actually-deployed resources, their monthly cost, and a verified teardown sequence
 
 ## Rollback / undo
 
-(to be filled)
+If Phase 1 needs to be reverted (budget breach, scope reset, decision change), tear down top-of-stack first so dependencies don't block:
+
+```bash
+# 1. Application layer
+helm uninstall payment -n payment
+kubectl delete namespace payment
+
+# 2. Datadog agent (so it stops shipping from a doomed cluster)
+helm uninstall datadog -n datadog
+kubectl delete namespace datadog
+
+# 3. EKS cluster (managed node group goes first, then control plane)
+terraform destroy -target=module.eks
+# Wait for nodes to fully terminate before next step
+
+# 4. VPC + networking (last; everything depends on this)
+terraform destroy -target=module.vpc
+```
+
+After running: check the AWS console for orphaned resources — common stragglers are detached EBS volumes, released-but-not-freed EIPs, ECR images still consuming storage (free under 500 MB). Update [../INVENTORY.md](../INVENTORY.md) to reflect zero spend.
 
 ## Comprehension checkpoints
 
-(to be filled)
+By end of Phase 1, you should be able to explain — out loud, without notes, in 60s or less per item:
 
-- [ ] ...
+- [ ] Why a NAT GW exists, and which subnets need it
+- [ ] What the Datadog agent does, and why it runs as a DaemonSet (not a single Deployment)
+- [ ] How a trace ID propagates from request → service → log line — naming what code/agent does what
+- [ ] What you'd check first if Datadog metrics suddenly stopped flowing
+- [ ] Why `kubectl port-forward` keeps working when the NAT GW dies (the control-plane vs data-plane split)
+- [ ] What's in the EKS Control Plane vs the EKS Data Plane, and who owns each
 
 ## Open questions
 
-(to be filled)
-
-- [ ] ?
+None blocking approval. The CI/CD GHA-vs-Jenkins choice in [../DECISIONS.md](../DECISIONS.md) is open but is a Phase 3 question, not a Phase 1 blocker.
 
 ## Decision log
 
