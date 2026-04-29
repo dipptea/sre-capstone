@@ -195,10 +195,26 @@ sequenceDiagram
 
 ### Implementation outline
 
-(to be filled — list 4–8 milestones in build order, milestone-level not command-level. Each milestone is a natural pause point for a comprehension question + verification step.)
+7 milestones, in build order. Each ends with a verification step that the **user** runs (per the Hands rule). Milestone-level only — specific commands belong in chat during execution.
 
-1. ...
-2. ...
+1. **External setup (accounts + identity).** One-time setup before any Terraform runs:
+   - **AWS account** with billing enabled + budget alarm ($200 soft / $500 hard).
+   - **AWS IAM Identity Center** (account-level instance) with a Permission Set scoped to admin, assigned to your user. Configure AWS CLI v2 via `aws configure sso` to create a `capstone-admin` profile (12-hour STS sessions via `aws sso login`). **No long-lived IAM access keys** on the laptop — see [../DECISIONS.md](../DECISIONS.md) for the cross-phase auth strategy.
+   - **Datadog trial** account; **Jira free tier**; **GitHub repo** created.
+
+   *Done when:* `aws sso login --profile capstone-admin` succeeds; `aws sts get-caller-identity --profile capstone-admin` returns an **assumed-role** ARN (not an IAM user); budget alarm visible in CloudWatch; Datadog API key in hand.
+
+2. **Terraform skeleton + remote state.** `backend.tf` (S3 bucket + DynamoDB lock table), `provider.tf`, `variables.tf`, empty `main.tf`. `terraform init` against the remote backend. *Done when:* `terraform validate` passes; the S3 state bucket exists and holds an (empty) state file.
+
+3. **VPC + networking.** Apply the official `terraform-aws-modules/vpc/aws` module: `10.0.0.0/16`, 2 AZs, public + private subnets per AZ, Internet Gateway, **1 shared NAT GW** in AZ-a's public subnet, route tables wired. *Done when:* VPC + 4 subnets visible in console; private subnet route tables point `0.0.0.0/0` at the NAT GW; public route tables point `0.0.0.0/0` at the IGW.
+
+4. **EKS cluster + managed node group.** Apply the official `terraform-aws-modules/eks/aws` module: control plane provisioned, 2× t3.medium managed node group in the private subnets, default 20 GB gp3 root volumes. Update kubeconfig with `aws eks update-kubeconfig`. *Done when:* `kubectl get nodes` returns 2 nodes in `Ready` status.
+
+5. **Datadog agent (DaemonSet).** Create a Kubernetes Secret holding the Datadog API key. Install the official Datadog Helm chart (`datadog/datadog`) with APM enabled and a `cluster_name` tag. *Done when:* `kubectl get ds -n datadog` shows the agent on both nodes; the cluster appears in the Datadog Infrastructure UI within ~5 min; node-level metrics (CPU, memory, network) are flowing.
+
+6. **Payment service — build, push, deploy.** Tiny FastAPI app with a `POST /pay` endpoint that returns 200 with a synthetic payment ID. `dd-trace` instrumentation wired in; `python-json-logger` configured so every log line includes the `dd.trace_id` field. `Dockerfile` builds a slim image; image pushed to ECR tagged with the git short SHA. **Hand-written** Helm chart (Deployment, Service, ServiceAccount, ConfigMap — no generator). `helm upgrade --install` deploys. *Done when:* `kubectl get pods -n payment` shows the pod `Running` and `1/1 Ready`.
+
+7. **End-to-end trace + log correlation (the actual deliverable).** `kubectl port-forward svc/payment 8080:80`, then `curl http://localhost:8080/pay`. *Done when:* (a) `curl` returns 200 with a synthetic `payment_id`, (b) the trace appears in Datadog APM tagged `payment-service`, (c) clicking the span reveals the correlated pod log line containing the same `trace_id`. **This milestone is the Validation that proves the phase succeeded.**
 
 ### Failure-mode notes
 
