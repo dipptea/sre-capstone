@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$0/mo** — nothing deployed yet (pre-Phase-01).
+**~$0/mo** — Milestone 1 complete (AWS accounts, IAM Identity Center, budgets, Datadog/Jira trials = all free/included). Real costs begin Phase 1 Milestone 2 (Terraform state bucket, then Phase 1 Milestone 4 onward with VPC/NAT/EKS).
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -17,7 +17,42 @@ Update this number whenever resources change. Treat the soft alert as "investiga
 
 ## Currently running
 
-_(empty — pre-Phase-01)_
+### AWS Account: capstone-sre-v2
+- **Type:** AWS Management Account + IAM Identity Center
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 01, Milestone 1 (Cluster Foundation)
+- **Why it exists:** Management account for workload deployment; Identity Center provides SSO + short-lived credentials per DECISIONS.md
+- **Estimated cost:** $0/mo (included in AWS Organizations)
+- **Teardown command:** Not during capstone. If decommissioning entire capstone, delete AWS Organization (will fail if member accounts exist — delete those first)
+- **Dependencies:** None within capstone (but organizational parent of the member account will exist when Phase 2+ adds separate deployment accounts)
+
+### AWS Budget Alarm
+- **Type:** AWS Budgets alert
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 01, Milestone 1
+- **Why it exists:** Alert at $100 (soft) and $200 (hard) to prevent budget surprise per ROADMAP
+- **Estimated cost:** $0/mo (AWS Budgets alerts are free)
+- **Teardown command:** AWS Console → Budgets → Delete budget
+- **Dependencies:** None
+
+### Datadog Trial Organization
+- **Type:** Datadog SaaS (observability platform)
+- **Region / account:** Datadog US (https://app.datadoghq.com)
+- **Provisioned in:** Phase 01, Milestone 1
+- **Why it exists:** APM, logs, infrastructure metrics, and synthetics per ROADMAP; observability-first principle
+- **Estimated cost:** $0 (14-day trial), then ~$50–150/mo depending on ingestion (can be deferred or deprioritized if budget tight)
+- **Teardown command:** Datadog Account Settings → Delete Organization (data is permanently lost)
+- **Dependencies:** None (standalone SaaS)
+- **API key location:** Datadog → Org Settings → API Keys (retrieve and store in password manager for Milestone 5 use)
+
+### Jira Free Tier Project
+- **Type:** Jira Cloud (project management / incident ticketing)
+- **Region / account:** https://capstone-sre.atlassian.net
+- **Provisioned in:** Phase 01, Milestone 1
+- **Why it exists:** Incident tickets + runbook links per ROADMAP; alert routing in Phase 7
+- **Estimated cost:** $0/mo (free tier, up to 10 users)
+- **Teardown command:** Jira Settings → Delete Project (then delete Organization if no other projects remain)
+- **Dependencies:** None (standalone SaaS)
 
 Format for each entry, when populated:
 
@@ -78,4 +113,4 @@ If the answer to #2 is "no" and #3 is "not sure," **stop and ask the user before
 
 ## Last updated
 
-2026-04-28 — Inventory created (pre-Phase-01 baseline, nothing deployed).
+2026-04-28 — Phase 01 Milestone 1 complete (AWS account + Identity Center + budgets + Datadog + Jira added).

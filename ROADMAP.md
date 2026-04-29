@@ -2,9 +2,9 @@
 
 ## STATUS
 
-- **Current phase:** 01 — Hello, observable payment (drafting spec)
+- **Current phase:** 01 — Hello, observable payment (Milestone 1 ✅ / Milestone 2 in progress)
 - **Last completed phase:** —
-- **Last updated:** 2026-04-28
+- **Last updated:** 2026-04-29
 
 _This section is updated by `/spec-new` and `/phase-close`. Manual edits are fine._
 
