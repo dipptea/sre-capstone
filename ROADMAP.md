@@ -2,7 +2,7 @@
 
 ## STATUS
 
-- **Current phase:** 01 — Hello, observable payment (Milestone 1 ✅ / Milestone 2 in progress)
+- **Current phase:** 01 — Hello, observable payment (Milestones 1–3 ✅ / Milestone 4 in progress)
 - **Last completed phase:** —
 - **Last updated:** 2026-04-29
 

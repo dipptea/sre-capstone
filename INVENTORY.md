@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$0/mo** — Milestone 1 complete (AWS accounts, IAM Identity Center, budgets, Datadog/Jira trials = all free/included). Real costs begin Phase 1 Milestone 2 (Terraform state bucket, then Phase 1 Milestone 4 onward with VPC/NAT/EKS).
+**~$33/mo** — Milestone 3 complete. NAT Gateway cost dominates (~$33/mo + ~$0.045/GB egress). VPC, subnets, IGW, and route tables are free. Real scaling costs begin Phase 1 Milestone 4 onward (EKS nodes).
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -53,6 +53,36 @@ Update this number whenever resources change. Treat the soft alert as "investiga
 - **Estimated cost:** $0/mo (free tier, up to 10 users)
 - **Teardown command:** Jira Settings → Delete Project (then delete Organization if no other projects remain)
 - **Dependencies:** None (standalone SaaS)
+
+### VPC: capstone-sre-vpc
+- **Type:** AWS VPC (Virtual Private Cloud)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 01, Milestone 3
+- **Why it exists:** Network isolation for EKS cluster and workloads per spec design; foundation for all subsequent infrastructure
+- **Estimated cost:** $0/mo (VPC itself is free; subnets, route tables, IGW are free)
+- **Teardown command:** `terraform destroy -target=module.vpc`
+- **Dependencies:** None (but EKS cluster will depend on it)
+- **ID:** vpc-068eebd69a8151098
+
+### NAT Gateway: capstone-sre-vpc-us-east-1a
+- **Type:** AWS NAT Gateway + Elastic IP
+- **Region / account:** us-east-1a / 591316258137
+- **Provisioned in:** Phase 01, Milestone 3
+- **Why it exists:** Enables private subnets to reach the internet (outbound only) for Datadog telemetry. Shared per Phase 1 spec; upgrades to per-AZ in Phase 5
+- **Estimated cost:** $33/mo (NAT GW) + ~$0.045/GB egress (Datadog telemetry)
+- **Teardown command:** `terraform destroy -target=module.vpc` (NAT destroyed with VPC)
+- **Dependencies:** VPC, Elastic IP, public subnet
+- **ID:** nat-0b9ff9ccb189b2b0b
+
+### Subnets & Route Tables
+- **Type:** AWS Subnets (2 public, 2 private) + Route Tables
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 01, Milestone 3
+- **Why it exists:** Public subnets hold ALB + NAT; private subnets hold EKS nodes and pods
+- **Estimated cost:** $0/mo (free)
+- **Teardown command:** `terraform destroy -target=module.vpc`
+- **Dependencies:** VPC
+- **Details:** Public: 10.0.101.0/24 (us-east-1a), 10.0.102.0/24 (us-east-1b) | Private: 10.0.1.0/24 (us-east-1a), 10.0.2.0/24 (us-east-1b)
 
 Format for each entry, when populated:
 
