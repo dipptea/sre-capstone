@@ -59,3 +59,23 @@ module "eks" {
 
 # OIDC provider is created automatically by the module when enable_irsa = true
 # No manual resource needed
+
+# Grant CapstoneAdmin role cluster admin access
+resource "aws_eks_access_entry" "capstone_admin" {
+  cluster_name      = module.eks.cluster_name
+  principal_arn     = "arn:aws:iam::591316258137:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_CapstoneAdmin_5211c2f501907eff"
+  type              = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "capstone_admin" {
+  cluster_name       = module.eks.cluster_name
+  policy_arn         = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  principal_arn      = "arn:aws:iam::591316258137:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_CapstoneAdmin_5211c2f501907eff"
+  access_scope {
+    type = "cluster"
+  }
+
+  provisioner "local-exec" {
+    command = "aws eks update-kubeconfig --region us-east-1 --name ${module.eks.cluster_name} --profile capstone-admin && sleep 5"
+  }
+}

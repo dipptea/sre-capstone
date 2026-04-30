@@ -1,7 +1,7 @@
 ---
 phase: 01
 title: Hello, observable payment
-status: approved  # draft | approved | in-progress | blocked | done | abandoned
+status: in-progress  # draft | approved | in-progress | blocked | done | abandoned
 created: 2026-04-28
 ---
 
@@ -285,4 +285,54 @@ None blocking approval. The CI/CD GHA-vs-Jenkins choice in [../DECISIONS.md](../
 
 ## Decision log
 
-(append entries during execution when something deviates or a choice gets made)
+### Milestone 5 — Datadog DaemonSet Deployment (2026-04-30)
+
+**Issue: Cross-Account AWS Authentication**
+- **What:** EKS cluster created in account 591316258137 (capstone-sre-v2), but user was authenticated to account 090762805447 (default).
+- **Decision:** Use AWS SSO profile `capstone-admin` to switch accounts (via `export AWS_PROFILE=capstone-admin`).
+- **Rationale:** SSO is the correct multi-account auth pattern; avoids long-lived IAM keys. No long-lived credentials on laptop (enforced by [../DECISIONS.md](../DECISIONS.md)).
+- **Result:** ✅ `kubectl` and Terraform now authenticate to correct cluster.
+
+**Issue: EKS Access Entry Configuration**
+- **What:** Attempted to use old `manage_aws_auth_configmap` Terraform parameter; module doesn't support it in v20.x. Also tried `kubernetes_groups = ["system:masters"]` which AWS EKS rejects (system: prefix is reserved).
+- **Decision:** Use modern `aws_eks_access_entry` + `aws_eks_access_policy_association` resources (AWS API-level controls, not Kubernetes-level ConfigMap).
+- **Rationale:** Old aws-auth ConfigMap pattern is deprecated. EKS now uses IAM-native access entries. System group names are AWS-reserved and forbidden.
+- **Result:** ✅ `aws_eks_access_policy_association` with `AmazonEKSClusterAdminPolicy` grants cluster-admin access without custom groups.
+
+**Issue: IAM Role ARN Format for SSO Roles**
+- **What:** Used `arn:aws:iam::591316258137:role/AWSReservedSSO_CapstoneAdmin_5211c2f501907eff` but AWS rejected it as "invalid principal". Real ARN is `arn:aws:iam::591316258137:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_CapstoneAdmin_5211c2f501907eff`.
+- **Decision:** Query actual ARN from AWS (`aws iam get-role`) rather than constructing it.
+- **Rationale:** SSO roles have special path format that's not obvious. Querying is the only reliable method.
+- **Result:** ✅ Access entry now accepts the full ARN with correct path.
+
+**Issue: Terraform Kubernetes Provider Defaulting to localhost**
+- **What:** `provider "kubernetes" {}` with no config defaulted to `localhost:80`, even after updating kubeconfig.
+- **Decision:** Explicitly configure provider with cluster endpoint, CA cert, and exec-based auth (AWS CLI token).
+- **Rationale:** Implicit configuration is fragile and error-prone. Explicit config is self-documenting and provider-initialization-order independent.
+- **Result:** ✅ Kubernetes provider now successfully authenticates via `aws eks get-token`.
+
+**Issue: Helm Provider Authentication**
+- **What:** Helm provider didn't automatically inherit Kubernetes provider config; tried various attribute names (`kubernetes_config_path`, nested `kubernetes { }` blocks) before finding correct syntax.
+- **Decision:** Use explicit Helm provider configuration with nested `kubernetes { config_path }` block pointing to kubeconfig.
+- **Rationale:** Helm provider has its own auth setup; it doesn't inherit from Kubernetes provider. Kubeconfig path is simpler than exec-based auth for this use case.
+- **Result:** ✅ Helm provider now reads kubeconfig and authenticates alongside Kubernetes provider.
+
+**Issue: Helm Repository Not in Local Cache**
+- **What:** Terraform Helm provider tried to download Datadog chart but local Helm cache didn't have the repository indexed. Error: "no cached repo found".
+- **Decision:** (1) Install Helm CLI (`brew install helm`). (2) Pre-populate repo with `helm repo add datadog https://helm.datadoghq.com --force-update && helm repo update`.
+- **Rationale:** Terraform Helm provider relies on local Helm CLI state. External dependencies must be pre-installed before Terraform runs.
+- **Result:** ✅ Datadog Helm chart successfully deploys.
+
+**Issue: Tilde Not Expanding in Terraform**
+- **What:** `config_path = "~/.kube/config"` was treated literally, not expanded to `/Users/deepti/.kube/config`.
+- **Decision:** Use `pathexpand("~/.kube/config")` function in Terraform to properly expand home directory.
+- **Rationale:** Terraform doesn't shell-expand paths. Built-in `pathexpand()` function is the standard workaround.
+- **Result:** ✅ Kubeconfig path now resolves correctly.
+
+**Issue: Provider Initialization & Environment Variables**
+- **What:** Setting `export AWS_PROFILE=capstone-admin` before `terraform apply` wasn't enough; Terraform still used old provider config.
+- **Decision:** Run `terraform init` AFTER setting environment variables, not before.
+- **Rationale:** Terraform providers are initialized and cached at `terraform init` time, not at `terraform apply` time. Env vars must be set before init.
+- **Result:** ✅ Subsequent applies now pick up correct AWS profile.
+
+---
