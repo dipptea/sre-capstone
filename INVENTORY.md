@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$33/mo** — Milestone 3 complete. NAT Gateway cost dominates (~$33/mo + ~$0.045/GB egress). VPC, subnets, IGW, and route tables are free. Real scaling costs begin Phase 1 Milestone 4 onward (EKS nodes).
+**~$99/mo** — Milestone 4 complete. Breakdown: NAT Gateway ~$33/mo + 2 t3.medium nodes ~$60/mo + EBS ~$6/mo. VPC, subnets, IGW, route tables free. EKS control plane ~$36/mo (included in cluster). Scaling costs grow with additional nodes/workloads in later phases.
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -83,6 +83,30 @@ Update this number whenever resources change. Treat the soft alert as "investiga
 - **Teardown command:** `terraform destroy -target=module.vpc`
 - **Dependencies:** VPC
 - **Details:** Public: 10.0.101.0/24 (us-east-1a), 10.0.102.0/24 (us-east-1b) | Private: 10.0.1.0/24 (us-east-1a), 10.0.2.0/24 (us-east-1b)
+
+### EKS Cluster: capstone-sre-cluster
+- **Type:** AWS EKS (Elastic Kubernetes Service)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 01, Milestone 4
+- **Why it exists:** Kubernetes control plane for running containerized payment service and observability workloads per spec
+- **Estimated cost:** ~$36–44/mo (EKS control plane fee, fixed per cluster)
+- **Teardown command:** `terraform destroy -target=module.eks`
+- **Dependencies:** VPC, private subnets, security groups
+- **Details:** Kubernetes 1.34, private + public API endpoint access, IRSA enabled (OIDC configured)
+- **Cluster name:** capstone-sre-cluster
+- **OIDC provider ARN:** arn:aws:iam::591316258137:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EBF1374F7317CC67C05A9922EB43FB65
+
+### EKS Managed Node Group
+- **Type:** AWS EKS Managed Node Group (EC2 worker nodes)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 01, Milestone 4
+- **Why it exists:** Worker nodes run pods (payment service, Datadog agent, ingress controller, etc.)
+- **Estimated cost:** ~$60/mo (2 × t3.medium ~$30/mo each) + ~$6/mo (30GB gp3 EBS × 2)
+- **Teardown command:** `terraform destroy -target=module.eks`
+- **Dependencies:** EKS cluster, VPC, private subnets
+- **Details:** 2 t3.medium nodes (2 vCPU, 4 GB RAM each), 1 per AZ (us-east-1a, us-east-1b), 30GB gp3 EBS per node, ON_DEMAND capacity type
+- **Node group name:** main-20260429215502793800000010 (auto-generated)
+- **Status:** ACTIVE
 
 Format for each entry, when populated:
 
