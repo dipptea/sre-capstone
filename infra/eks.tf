@@ -23,7 +23,7 @@ module "eks" {
   # Node group configuration
   eks_managed_node_groups = {
     main = {
-      name = "main"
+      name_prefix = "capstone-sre-nodes-"
 
       instance_types = ["t3.medium"]
       capacity_type  = "ON_DEMAND"
