@@ -1,0 +1,5 @@
+fastapi==0.111.0
+uvicorn==0.29.0
+ddtrace==2.8.4
+python-json-logger==2.0.7
+wrapt==1.16.0

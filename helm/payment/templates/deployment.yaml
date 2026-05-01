@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "payment.fullname" . }}
+  labels:
+    app: payment-service
+    version: {{ .Chart.AppVersion | quote }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+        version: {{ .Chart.AppVersion | quote }}
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      serviceAccountName: {{ include "payment.fullname" . }}
+      containers:
+      - name: payment
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.service.targetPort }}
+          protocol: TCP
+        env:
+        - name: DD_SERVICE
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "payment.fullname" . }}
+              key: DD_SERVICE
+        - name: DD_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "payment.fullname" . }}
+              key: DD_ENV
+        - name: DD_VERSION
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "payment.fullname" . }}
+              key: DD_VERSION
+        - name: DD_TRACE_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "payment.fullname" . }}
+              key: DD_TRACE_ENABLED
+        - name: DD_AGENT_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "payment.fullname" . }}
+              key: DD_AGENT_HOST
+        - name: DD_AGENT_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "payment.fullname" . }}
+              key: DD_AGENT_PORT
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 2
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        resources: {{ toYaml .Values.resources | nindent 10 }}

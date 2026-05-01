@@ -36,7 +36,7 @@ resource "null_resource" "datadog_helm_release" {
         --namespace datadog \
         --version 3.62.0 \
         --set datadog.apiKey=${local.datadog_api_key} \
-        --set datadog.site=datadoghq.com \
+        --set datadog.site=us5.datadoghq.com \
         --set agents.enabled=true \
         --set agents.rbac.create=true \
         --set agents.tolerations[0].operator=Exists \
