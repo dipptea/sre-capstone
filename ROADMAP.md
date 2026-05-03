@@ -2,9 +2,9 @@
 
 ## STATUS
 
-- **Current phase:** 01 — Hello, observable payment (Milestones 1–4 ✅ / Milestone 5 in progress)
-- **Last completed phase:** —
-- **Last updated:** 2026-04-29
+- **Current phase:** 02 — Ingress and second service (not yet started)
+- **Last completed phase:** 01 — Hello, observable payment (closed 2026-05-03)
+- **Last updated:** 2026-05-03
 
 _This section is updated by `/spec-new` and `/phase-close`. Manual edits are fine._
 

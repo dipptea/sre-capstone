@@ -49,15 +49,11 @@ spec:
               name: {{ include "payment.fullname" . }}
               key: DD_TRACE_ENABLED
         - name: DD_AGENT_HOST
-          valueFrom:
-            configMapKeyRef:
-              name: {{ include "payment.fullname" . }}
-              key: DD_AGENT_HOST
-        - name: DD_AGENT_PORT
-          valueFrom:
-            configMapKeyRef:
-              name: {{ include "payment.fullname" . }}
-              key: DD_AGENT_PORT
+          value: "datadog.datadog.svc.cluster.local"
+        - name: DD_TRACE_AGENT_PORT
+          value: "8126"
+        - name: DD_LOGS_INJECTION
+          value: "true"
         readinessProbe:
           httpGet:
             path: /health

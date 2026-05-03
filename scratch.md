@@ -13,3 +13,4 @@ Logs alone tell you: somewhere on a pod, around 14:03:22, a log line says paymen
 Correlation = the trace_id is stamped into that log line. You click the slow span in Datadog APM and it shows you that exact log line without you grepping by timestamp across N pods.
 When/where - Trace
 what/why - log
+

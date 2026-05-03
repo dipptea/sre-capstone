@@ -1,8 +1,9 @@
 ---
 phase: 01
 title: Hello, observable payment
-status: in-progress  # draft | approved | in-progress | blocked | done | abandoned
+status: done  # draft | approved | in-progress | blocked | done | abandoned
 created: 2026-04-28
+closed: 2026-05-03
 ---
 
 # Phase 01 — Hello, observable payment

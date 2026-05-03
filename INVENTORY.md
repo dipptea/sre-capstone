@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$99/mo** — Milestone 4 complete. Breakdown: NAT Gateway ~$33/mo + 2 t3.medium nodes ~$60/mo + EBS ~$6/mo. VPC, subnets, IGW, route tables free. EKS control plane ~$36/mo (included in cluster). Scaling costs grow with additional nodes/workloads in later phases.
+**~$135/mo** — Phase 01 complete (Milestones 1–7). Breakdown: NAT Gateway ~$33/mo + 2 t3.medium nodes ~$60/mo + EBS ~$6/mo + EKS control plane ~$36/mo. ECR storage ~$0/mo (image <500 MB free tier). Datadog SaaS ingestion still on free trial. VPC, subnets, IGW, route tables, ServiceAccounts, ConfigMaps, K8s objects all free. Scaling costs will grow when CI/CD adds image churn (Phase 3) and additional services are deployed.
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -108,6 +108,38 @@ Update this number whenever resources change. Treat the soft alert as "investiga
 - **Node group name:** main-20260429215502793800000010 (auto-generated)
 - **Status:** ACTIVE
 
+### Datadog Agent (Helm release in Kubernetes)
+- **Type:** Helm release (`datadog`) deploying the Datadog DaemonSet (agent + trace-agent + process-agent per node)
+- **Region / account:** Cluster: capstone-sre-cluster (us-east-1) / 591316258137 — telemetry ships to us5.datadoghq.com
+- **Provisioned in:** Phase 01, Milestone 5
+- **Why it exists:** Ships node + pod + container metrics, logs, and APM traces to Datadog SaaS — the observability foundation every later phase depends on
+- **Estimated cost:** $0 during Datadog trial (~14 days remaining); afterwards depends on host count + log volume — typically ~$50–150/mo at this scale, can be deferred or downgraded if budget tight
+- **Teardown command:** `helm uninstall datadog -n datadog && kubectl delete namespace datadog` (or `terraform destroy -target=null_resource.datadog_helm_release`)
+- **Dependencies:** EKS cluster, Datadog API key in `.env`, internet egress via NAT GW
+- **Details:** Helm chart `datadog/datadog` v3.62.0, site=`us5.datadoghq.com`, APM enabled, logs.containerCollectAll=true, cluster_agent disabled
+
+### ECR Repository: payment-service
+- **Type:** AWS ECR (Elastic Container Registry)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 01, Milestone 6
+- **Why it exists:** Stores the payment-service container image with immutable git-SHA tags so EKS can pull a known-exact version (no `latest` drift)
+- **Estimated cost:** $0/mo (free under 500 MB; current image ~340 MB; lifecycle policy keeps only last 10 images)
+- **Teardown command:** `terraform destroy -target=aws_ecr_lifecycle_policy.payment -target=aws_ecr_repository.payment` (lifecycle policy goes first; ECR repo destroy fails if images exist — `aws ecr batch-delete-image` first if needed)
+- **Dependencies:** None (standalone)
+- **Details:** IMMUTABLE tag mutability, scan-on-push enabled, AES256 encryption, lifecycle policy: `imageCountMoreThan 10 → expire`
+- **URL:** 591316258137.dkr.ecr.us-east-1.amazonaws.com/payment-service
+
+### Payment Service (Helm release in Kubernetes)
+- **Type:** Helm release (`payment`) deploying FastAPI service (Deployment + Service + ServiceAccount + ConfigMap)
+- **Region / account:** Namespace `payment` in cluster capstone-sre-cluster (us-east-1) / 591316258137
+- **Provisioned in:** Phase 01, Milestone 6
+- **Why it exists:** The single service traced end-to-end in Phase 01 — proves the observability pipeline (curl → trace → log correlation) works
+- **Estimated cost:** $0/mo incremental (runs on existing t3.medium nodes already counted; pulls existing ECR image)
+- **Teardown command:** `helm uninstall payment -n payment && kubectl delete namespace payment`
+- **Dependencies:** EKS cluster, ECR image `payment-service:<git-sha>`, Datadog agent (for trace shipping)
+- **Details:** 1 replica, port 80→8080, `/health` readiness+liveness probes, `ddtrace-run` entrypoint, `DD_LOGS_INJECTION=true` for trace_id in JSON logs
+- **Image tag deployed:** `f6df6dd`
+
 Format for each entry, when populated:
 
 ```
@@ -167,4 +199,4 @@ If the answer to #2 is "no" and #3 is "not sure," **stop and ask the user before
 
 ## Last updated
 
-2026-04-28 — Phase 01 Milestone 1 complete (AWS account + Identity Center + budgets + Datadog + Jira added).
+2026-05-01 — Phase 01 closed. Added: Datadog Helm release (M5), ECR repo for payment-service (M6), payment-service Helm release (M6). Cumulative cost ~$135/mo (still well under $200 soft alert).
