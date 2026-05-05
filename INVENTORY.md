@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$135/mo** — Phase 01 complete (Milestones 1–7). Breakdown: NAT Gateway ~$33/mo + 2 t3.medium nodes ~$60/mo + EBS ~$6/mo + EKS control plane ~$36/mo. ECR storage ~$0/mo (image <500 MB free tier). Datadog SaaS ingestion still on free trial. VPC, subnets, IGW, route tables, ServiceAccounts, ConfigMaps, K8s objects all free. Scaling costs will grow when CI/CD adds image churn (Phase 3) and additional services are deployed.
+**~$160.50/mo** — Phase 02 complete (Milestones 1–8). Phase 01 baseline ~$135/mo + ALB ~$25/mo + Route 53 hosted zone $0.50/mo. **ALB scheduled for teardown after 2-week test horizon (~$12 incremental sunk).** After ALB teardown, ongoing cost returns to ~$135.50/mo until Phase 03. Domain `payservice.click` is $3 one-time for 1 year (auto-renew DISABLED; lapses 2027-05-04). ACM cert, Route 53 alias record, AWS Load Balancer Controller (Helm), IRSA IAM role, and subnet tags all add $0/mo.
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -140,6 +140,89 @@ Update this number whenever resources change. Treat the soft alert as "investiga
 - **Details:** 1 replica, port 80→8080, `/health` readiness+liveness probes, `ddtrace-run` entrypoint, `DD_LOGS_INJECTION=true` for trace_id in JSON logs
 - **Image tag deployed:** `f6df6dd`
 
+### Domain Registration: payservice.click
+- **Type:** Route 53 domain registration (1-year)
+- **Region / account:** Global / 591316258137
+- **Provisioned in:** Phase 02, Milestone 1
+- **Why it exists:** Public hostname for payment-service; capstone needs a domain we control to issue ACM certs and create Route 53 alias records
+- **Estimated cost:** $3 one-time for 1 year (paid 2026-05-04, expires 2027-05-04, **auto-renew DISABLED** — will lapse with no further action)
+- **Teardown command:** Auto-renew is off → will lapse 2027-05-04 with no further charges. To release earlier: AWS Console → Route 53 → Domains → select domain → Delete (will fail if any records other than NS/SOA exist; remove them first).
+- **Dependencies:** None
+- **Details:** Registered in capstone-sre-v2 SSO account after wrong-account mishap with `srelab.click` (see Decision log entry 2026-05-05 in [specs/phase-02.md](specs/phase-02.md))
+
+### Route 53 Hosted Zone: payservice.click
+- **Type:** AWS Route 53 public hosted zone (auto-created with the domain registration)
+- **Region / account:** Global / 591316258137
+- **Provisioned in:** Phase 02, Milestone 1 (auto-created with domain)
+- **Why it exists:** Authoritative DNS for `payservice.click`; holds the ACM validation CNAME and the alias record for the ALB
+- **Estimated cost:** $0.50/mo per hosted zone + ~$0.40 per million queries (alias queries to AWS targets are FREE; only non-alias queries are billed)
+- **Teardown command:** `aws route53 delete-hosted-zone --id Z02200631UNGHSRBPV9WQ --profile capstone-admin` (after deleting all non-default records). Only delete if also releasing the domain — orphans the registration otherwise.
+- **Dependencies:** Domain registration `payservice.click`
+- **Zone ID:** Z02200631UNGHSRBPV9WQ
+
+### ACM Certificate: payment.payservice.click
+- **Type:** AWS Certificate Manager public TLS cert (DNS-validated)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 02, Milestone 2
+- **Why it exists:** TLS termination at the ALB so `curl https://payment.payservice.click` works without `--insecure`
+- **Estimated cost:** $0/mo (free for AWS-resident workloads — ALB, CloudFront, API Gateway)
+- **Teardown command:** `terraform destroy -target=aws_acm_certificate_validation.payment -target=aws_acm_certificate.payment` (only after the ALB no longer references the cert — destroy will fail otherwise)
+- **Dependencies:** Route 53 hosted zone (for DNS validation CNAME); ALB (consumer)
+- **Details:** Validity 2026-05-05 to 2026-11-18 (~6.5 months); ACM auto-renews 60 days before expiry **only if attached to an AWS resource** (`InUseBy` non-empty)
+- **ARN:** arn:aws:acm:us-east-1:591316258137:certificate/a17fa89c-5e52-41df-ae72-c5d700b7c3dc
+
+### Subnet Tags (LBC discovery)
+- **Type:** AWS resource tags (metadata on existing Phase 01 subnets — not separately billable)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 02, Milestone 3
+- **Why it exists:** AWS Load Balancer Controller scans subnets by these specific tag strings to decide where to provision ALBs (public for internet-facing, private for internal-only)
+- **Estimated cost:** $0/mo
+- **Teardown command:** Remove `public_subnet_tags` and `private_subnet_tags` blocks from `infra/vpc.tf`, then `terraform apply`
+- **Dependencies:** VPC subnets (Phase 01)
+- **Details:** Public subnets (`10.0.101.0/24`, `10.0.102.0/24`) tagged `kubernetes.io/role/elb=1`. Private subnets (`10.0.1.0/24`, `10.0.2.0/24`) tagged `kubernetes.io/role/internal-elb=1`.
+
+### IRSA IAM Role + Policy: capstone-sre-lbc-irsa
+- **Type:** IAM Role + AWS-published Load Balancer Controller IAM policy (via `terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks` submodule)
+- **Region / account:** Global / 591316258137
+- **Provisioned in:** Phase 02, Milestone 4
+- **Why it exists:** Grants the LBC pod permissions to call ELB APIs (`CreateLoadBalancer`, `RegisterTargets`, etc.) via short-lived OIDC-issued tokens — no static AWS keys in the cluster
+- **Estimated cost:** $0/mo (IAM roles + policies are free)
+- **Teardown command:** `terraform destroy -target=module.lbc_irsa` (after LBC Helm release is uninstalled — IAM role destroy fails if policy attachment exists)
+- **Dependencies:** EKS OIDC provider (Phase 01), `kube-system/aws-load-balancer-controller` ServiceAccount (created by LBC chart)
+- **Trust policy condition:** `sub = system:serviceaccount:kube-system:aws-load-balancer-controller` — locks role to that *exact* (namespace, SA) pair
+- **ARN:** arn:aws:iam::591316258137:role/capstone-sre-lbc-irsa
+
+### AWS Load Balancer Controller (Helm release in Kubernetes)
+- **Type:** Helm release (`aws-load-balancer-controller`) deploying the LBC Deployment in `kube-system`
+- **Region / account:** Cluster: capstone-sre-cluster (us-east-1) / 591316258137
+- **Provisioned in:** Phase 02, Milestone 4
+- **Why it exists:** Watches Kubernetes Ingress objects and provisions matching ALBs + listeners + target groups + listener rules via AWS APIs
+- **Estimated cost:** $0/mo incremental (runs on existing t3.medium nodes already counted)
+- **Teardown command:** `helm uninstall aws-load-balancer-controller -n kube-system` (any ALBs created by this controller will become orphans — delete Ingress objects FIRST so the controller cleans up the ALBs while it can still reach AWS APIs)
+- **Dependencies:** EKS cluster, IRSA IAM role + policy, EKS OIDC provider, subnet tags
+- **Details:** Helm chart `eks/aws-load-balancer-controller` v1.11.0, controller v2.11.0, **2 replicas (HA via leader election)**, ServiceAccount annotated with IRSA role ARN
+
+### ALB: k8s-payment-payment-490cbbb298
+- **Type:** AWS Application Load Balancer (provisioned by AWS Load Balancer Controller from the payment-service Ingress)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 02, Milestone 6
+- **Why it exists:** Public HTTPS entry point for payment-service per spec — terminates TLS, routes to pod IP via `target-type: ip`
+- **Estimated cost:** ~$25/mo while running (~$16 base ALB charge + ~$9 LCU for light traffic). **Plan: tear down after 2-week test horizon → ~$12 total Phase 02 ALB spend.**
+- **Teardown command:** `kubectl delete ingress payment -n payment` (LBC tears down ALB within ~2 min) OR `helm upgrade payment ./helm/payment --reset-then-reuse-values --set ingress.enabled=false -n payment`. Verify with `aws elbv2 describe-load-balancers --profile capstone-admin --region us-east-1` (should not show `k8s-payment-*`).
+- **Dependencies:** EKS cluster, AWS Load Balancer Controller (Helm), ACM cert, payment-service Service, public subnets (with `elb` tag)
+- **Details:** internet-facing scheme, HTTP :80 listener (redirect to :443), HTTPS :443 listener with ACM cert + 404 fixed-response default action, target group `target-type: ip` with `/health` health check, 2 AZs (us-east-1a + us-east-1b)
+- **DNS name:** k8s-payment-payment-490cbbb298-839711176.us-east-1.elb.amazonaws.com
+
+### Route 53 Alias Record: payment.payservice.click → ALB
+- **Type:** Route 53 A-alias record (resolves dynamically to ALB's public IPs)
+- **Region / account:** Global / 591316258137
+- **Provisioned in:** Phase 02, Milestone 7
+- **Why it exists:** Maps friendly hostname `payment.payservice.click` to the ALB's auto-generated DNS name; alias type allows zero-cost resolution for AWS targets (CNAME would charge per query)
+- **Estimated cost:** $0/mo (alias queries to AWS-owned targets are not billed by Route 53)
+- **Teardown command:** `terraform destroy -target=aws_route53_record.payment`
+- **Dependencies:** Route 53 hosted zone `payservice.click`, ALB (data source lookup via tag filter)
+- **Details:** Type A, alias to ALB DNS, `evaluate_target_health = true` (Route 53 returns NXDOMAIN if all ALB targets are unhealthy)
+
 Format for each entry, when populated:
 
 ```
@@ -157,7 +240,7 @@ Format for each entry, when populated:
 
 Historical record of resources that have been removed. Helps you see the *churn* of what you've been provisioning + destroying.
 
-_(empty)_
+- 2026-05-04 — Route 53 hosted zone `srelab.click` (in capstone-sre-v2) torn down (Phase 02 Milestone 1, reason: orphan zone left behind when domain was registered in the wrong AWS account; cleaned up before registering `payservice.click` correctly).
 
 Format:
 ```
@@ -169,20 +252,39 @@ Format:
 If the budget is breached or you're stepping away for >2 weeks, this is the safe-stop sequence. Maintain it as you go — at every phase close, verify the steps below would actually take the system to zero spend.
 
 ```
-# 1. Apps & ingress (top of stack first)
-helm uninstall <release> -n <ns>      # repeat per release
-kubectl delete ingress --all -A       # ALB Controller will deprovision the ALB
+# 1. Public DNS first — users get clean NXDOMAIN instead of a half-broken ALB
+terraform destroy -target=aws_route53_record.payment
 
-# 2. Cluster
+# 2. Ingress objects — LBC tears down ALB + listeners + target group
+kubectl delete ingress --all -A
+# wait ~2 min, verify with: aws elbv2 describe-load-balancers --profile capstone-admin --region us-east-1
+
+# 3. ACM cert (only after ALB is gone, otherwise destroy fails)
+terraform destroy -target=aws_acm_certificate_validation.payment -target=aws_acm_certificate.payment
+
+# 4. Helm releases (apps, LBC, observability)
+helm uninstall payment -n payment
+helm uninstall aws-load-balancer-controller -n kube-system
+helm uninstall datadog -n datadog
+kubectl delete namespace payment datadog
+
+# 5. IRSA role for LBC
+terraform destroy -target=module.lbc_irsa
+
+# 6. Cluster
 terraform destroy -target=module.eks
 # wait for nodes/cluster to fully delete
 
-# 3. Networking (last — other things depend on it)
+# 7. Networking (last — other things depend on it)
 terraform destroy -target=module.vpc
 
-# 4. Datadog: the agent stops billing once the cluster is gone, but the org/account stays
-# 5. ECR repos: free unless storing >500MB
-# 6. S3 buckets used by terraform state: keep (cheap, valuable)
+# 8. Route 53 hosted zone (optional — costs $0.50/mo to keep, useful for next phase if reusing the domain)
+# aws route53 delete-hosted-zone --id Z02200631UNGHSRBPV9WQ --profile capstone-admin
+
+# 9. Domain registration: auto-renew is OFF; lapses 2027-05-04. To release sooner, AWS Console → Route 53 → Domains
+# 10. Datadog: the agent stops billing once the cluster is gone, but the org/account stays
+# 11. ECR repos: free unless storing >500MB
+# 12. S3 buckets used by terraform state: keep (cheap, valuable)
 ```
 
 After running this: re-check the AWS console for any resources that survived (orphaned ENIs, EBS volumes, EIPs are common stragglers).
@@ -198,5 +300,7 @@ Before running `terraform apply` at the start of a phase, ask:
 If the answer to #2 is "no" and #3 is "not sure," **stop and ask the user before applying.** Hitting the soft alert silently is a framework failure, not the user's responsibility.
 
 ## Last updated
+
+2026-05-05 — Phase 02 closed. Added: domain `payservice.click` registration (M1), Route 53 hosted zone (M1), ACM cert (M2), subnet tags (M3), IRSA IAM role + LBC Helm release (M4), ALB via Ingress (M6), Route 53 alias record (M7). Removed: orphan `srelab.click` hosted zone in capstone account (wrong-account cleanup). Cumulative cost ~$160.50/mo while ALB is up; returns to ~$135.50/mo after planned 2-week ALB teardown. Still under $200 soft alert.
 
 2026-05-01 — Phase 01 closed. Added: Datadog Helm release (M5), ECR repo for payment-service (M6), payment-service Helm release (M6). Cumulative cost ~$135/mo (still well under $200 soft alert).

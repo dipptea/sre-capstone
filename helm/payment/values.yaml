@@ -26,3 +26,13 @@ resources:
     cpu: 500m
     memory: 512Mi
 
+# Ingress (Phase 02). Disabled by default — opt in with --set ingress.enabled=true.
+# When enabled, the AWS Load Balancer Controller provisions an internet-facing
+# ALB and binds the ACM cert via the certificateArn below.
+ingress:
+  enabled: false
+  host: payment.payservice.click
+  # Pass at upgrade time, not committed to repo:
+  #   --set ingress.certificateArn="$(cd ../infra && terraform output -raw acm_certificate_arn)"
+  certificateArn: ""
+

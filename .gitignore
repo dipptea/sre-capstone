@@ -28,6 +28,9 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+# Saved plan files — may contain sensitive resource attributes / secrets
+tfplan
+*.tfplan
 
 # Helm
 charts/*.tgz
@@ -45,3 +48,15 @@ venv/
 # Build
 dist/
 build/
+
+# Terraform plan files (may contain sensitive values)
+infra/tfplan*
+infra/tplan*
+*.tfplan
+tfplan
+
+# Terraform plan files (may contain sensitive values)
+infra/tfplan*
+infra/tplan*
+*.tfplan
+tfplan
