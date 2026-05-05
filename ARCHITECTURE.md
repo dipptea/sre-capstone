@@ -8,6 +8,10 @@ For the *delta* introduced by any given phase (and the failure-mode notes for ne
 
 End-state of Phase 02: Phase 01 + public HTTPS via ALB. Public users hit `https://payment.payservice.click/pay` from any laptop on the internet → 200, with no `--insecure` flag, observable end-to-end in Datadog APM and Logs.
 
+![Phase 02 architecture — public HTTPS via ALB](docs/diagrams/phase-02-architecture.png)
+
+*Diagram above is the polished view (PNG). The Mermaid version below is the source-controlled equivalent — easier to edit in PRs, renders inline in GitHub.*
+
 ```mermaid
 flowchart LR
     user["🌐 Public user<br/>(curl, browser)"]
@@ -128,6 +132,10 @@ End-to-end trace path for `curl -X POST https://payment.payservice.click/pay` (v
 ## Phase 01 baseline (preserved for comparison)
 
 End-state of Phase 01: VPC + EKS + payment-service + Datadog observability pipeline. One end-to-end traced `curl` request whose trace correlates to a log line via shared `trace_id`.
+
+![Phase 01 architecture — VPC + EKS + payment-service + Datadog](docs/diagrams/phase-01-architecture.png)
+
+*Diagram above is the polished view (PNG). The Mermaid version below is the source-controlled equivalent — easier to edit in PRs, renders inline in GitHub.*
 
 ```mermaid
 flowchart LR
