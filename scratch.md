@@ -14,3 +14,5 @@ Correlation = the trace_id is stamped into that log line. You click the slow spa
 When/where - Trace
 what/why - log
 
+
+2026-05-06 — Phase 03 M5: opened this PR to verify PR trigger runs test job only (no build, no deploy).
