@@ -15,7 +15,11 @@ logger.setLevel(logging.INFO)
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    # Phase 03 M7 — deliberately broken to validate Helm --atomic auto-rollback.
+    # Kubernetes readiness probe hits this endpoint; getting 500 will mark the
+    # new pod NotReady, helm upgrade --atomic times out at 5min, rolls back.
+    # REVERT after observing the rollback.
+    raise Exception("phase 03 m7 negative test — intentional break")
 
 
 @app.post("/pay")
