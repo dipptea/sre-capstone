@@ -1,0 +1,137 @@
+# Phase 03 — CI/CD pipeline for payment-service.
+#
+# Triggers:
+#   - push to main: full pipeline (test → build & push to ECR → deploy to EKS)
+#   - pull_request: tests only (no ECR push, no deploy)
+#   - workflow_dispatch: manual trigger from the Actions UI
+#
+# AWS auth: OIDC (no static keys). Trust policy on gh-actions-deployer locks
+# AssumeRoleWithWebIdentity to pushes from this repo's main branch only.
+#
+# Image tag: short git SHA (immutable; tagged in ECR with no overwrite risk).
+# Deploy: helm upgrade --atomic with 5m timeout (auto-rollback on failure).
+
+name: Deploy payment-service
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: '591316258137'
+  ECR_REPOSITORY: payment-service
+  EKS_CLUSTER_NAME: capstone-sre-cluster
+  HELM_RELEASE_NAME: payment
+  HELM_NAMESPACE: payment
+  IAM_ROLE_ARN: arn:aws:iam::591316258137:role/gh-actions-deployer
+
+# Required for OIDC token acquisition. `contents: read` for actions/checkout.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # test — runs on every push and PR. No AWS access needed.
+  # -------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies + pytest
+        working-directory: services/payment
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run pytest
+        working-directory: services/payment
+        run: pytest -v
+
+      - name: Validate Dockerfile builds (no push)
+        working-directory: services/payment
+        run: docker build -t payment-service:test .
+
+  # -------------------------------------------------------------------------
+  # build-and-push — push to main only. Builds image, pushes to ECR.
+  # -------------------------------------------------------------------------
+  build-and-push:
+    name: Build & push to ECR
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      image_tag: ${{ steps.sha.outputs.SHORT_SHA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute short SHA (7 chars)
+        id: sha
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin \
+                "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+      - name: Build & push image
+        working-directory: services/payment
+        run: |
+          IMAGE_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:${{ steps.sha.outputs.SHORT_SHA }}"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+  # -------------------------------------------------------------------------
+  # deploy — push to main only. helm upgrade --atomic with auto-rollback.
+  # -------------------------------------------------------------------------
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Helm upgrade --atomic
+        run: |
+          helm upgrade --install "$HELM_RELEASE_NAME" ./helm/payment \
+            --namespace "$HELM_NAMESPACE" \
+            --create-namespace \
+            --reuse-values \
+            --set image.repository="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY" \
+            --set image.tag="${{ needs.build-and-push.outputs.image_tag }}" \
+            --atomic --timeout 5m
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/$HELM_RELEASE_NAME -n "$HELM_NAMESPACE" --timeout=5m
+          kubectl get pods -n "$HELM_NAMESPACE"
