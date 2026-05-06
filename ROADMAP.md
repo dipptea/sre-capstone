@@ -2,7 +2,7 @@
 
 ## STATUS
 
-- **Current phase:** 03 — CI/CD pipeline (pending — run `/spec-new 03` to start)
+- **Current phase:** 03 — CI/CD pipeline (spec approved, ready for implementation)
 - **Last completed phase:** 02 — Ingress and second service (closed 2026-05-05)
 - **Last updated:** 2026-05-05
 
