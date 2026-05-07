@@ -1,9 +1,10 @@
 ---
 phase: 03
 title: CI/CD pipeline (push to main → deployed)
-status: in-progress  # draft | approved | in-progress | blocked | done | abandoned
+status: done  # draft | approved | in-progress | blocked | done | abandoned
 created: 2026-05-05
 approved: 2026-05-05
+closed: 2026-05-07
 ---
 
 # Phase 03 — CI/CD pipeline (push to main → deployed)

@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$160.50/mo** — Phase 02 complete (Milestones 1–8). Phase 01 baseline ~$135/mo + ALB ~$25/mo + Route 53 hosted zone $0.50/mo. **ALB scheduled for teardown after 2-week test horizon (~$12 incremental sunk).** After ALB teardown, ongoing cost returns to ~$135.50/mo until Phase 03. Domain `payservice.click` is $3 one-time for 1 year (auto-renew DISABLED; lapses 2027-05-04). ACM cert, Route 53 alias record, AWS Load Balancer Controller (Helm), IRSA IAM role, and subnet tags all add $0/mo.
+**~$160.50/mo** — Phase 03 complete (CI/CD pipeline). Phase 02 baseline ~$160.50/mo unchanged. **Phase 03 added $0/mo** — GitHub OIDC provider, IAM Role for GH Actions, EKS access entry, and GitHub Actions workflow are all free (IAM has no cost; GitHub Actions on public-repo runners is free). ECR storage grew from 1 to 7 images (~2 GB), slightly over the always-free 500 MB tier → **~$0.15-0.30/mo** for ECR storage when AWS bills it. Negligible but no longer literally zero. **ALB still scheduled for teardown after 2-week test horizon.** Domain `payservice.click` $3 one-time, auto-renew DISABLED.
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -223,6 +223,48 @@ Update this number whenever resources change. Treat the soft alert as "investiga
 - **Dependencies:** Route 53 hosted zone `payservice.click`, ALB (data source lookup via tag filter)
 - **Details:** Type A, alias to ALB DNS, `evaluate_target_health = true` (Route 53 returns NXDOMAIN if all ALB targets are unhealthy)
 
+### GitHub Actions OIDC provider in AWS IAM
+- **Type:** IAM OIDC identity provider (`aws_iam_openid_connect_provider`)
+- **Region / account:** Global / 591316258137
+- **Provisioned in:** Phase 03, Milestone 1
+- **Why it exists:** Lets GitHub-hosted Actions runners assume an AWS IAM Role via short-lived OIDC tokens — no static AWS keys stored in GitHub repository secrets. Sits alongside the existing EKS OIDC provider (Phase 01). Different issuer URL: `token.actions.githubusercontent.com` (vs EKS's `oidc.eks.us-east-1.amazonaws.com/id/<cluster-id>`).
+- **Estimated cost:** $0/mo (IAM OIDC providers are free)
+- **Teardown command:** `terraform destroy -target=aws_iam_openid_connect_provider.github` (only after the IAM Role that trusts it has been destroyed)
+- **Dependencies:** None (but the gh-actions-deployer IAM Role's trust policy references this provider's ARN)
+- **Details:** Thumbprint pinned dynamically via `tls_certificate` data source — re-runs at every `terraform apply` so cert rotations on GitHub's side auto-refresh. **Failure-mode worth knowing:** if GitHub rotates their cert and you don't re-apply, all GH Actions auth silently breaks until next `terraform apply`.
+- **ARN:** arn:aws:iam::591316258137:oidc-provider/token.actions.githubusercontent.com
+
+### IAM Role: gh-actions-deployer
+- **Type:** IAM Role + inline policy (`aws_iam_role` + `aws_iam_role_policy`)
+- **Region / account:** Global / 591316258137
+- **Provisioned in:** Phase 03, Milestone 2
+- **Why it exists:** Assumed by GitHub Actions on push to main. Permissions: ECR push to `payment-service` repo + `eks:DescribeCluster` on `capstone-sre-cluster`. Trust policy locks `AssumeRoleWithWebIdentity` to `repo:dipptea/sre-capstone:ref:refs/heads/main` only — pushes from feature branches and PRs from forks cannot assume this role.
+- **Estimated cost:** $0/mo (IAM roles + inline policies are free)
+- **Teardown command:** `terraform destroy -target=aws_iam_role_policy.gh_actions_deployer -target=aws_iam_role.gh_actions_deployer` (policy first, then role — IAM dependency order)
+- **Dependencies:** GitHub OIDC provider (trust policy `Federated` principal); ECR repo `payment-service`; EKS cluster `capstone-sre-cluster` (resource ARN scopes)
+- **Details:** Inline policy `gh-actions-deployer-permissions` with 3 statements: ECR push verbs (scoped to one repo), `ecr:GetAuthorizationToken` (resource: `*` per AWS API limitation), `eks:DescribeCluster` (scoped to one cluster). No S3, no Secrets Manager, no general read.
+- **ARN:** arn:aws:iam::591316258137:role/gh-actions-deployer
+
+### EKS access entry for gh-actions-deployer
+- **Type:** EKS access entry + cluster access policy association (`aws_eks_access_entry` + `aws_eks_access_policy_association`)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 03, Milestone 3
+- **Why it exists:** Grants the `gh-actions-deployer` IAM Role Kubernetes RBAC inside the cluster — without it, AssumeRole succeeds but `helm upgrade` fails with `Unauthorized` from the K8s API. Uses `AmazonEKSClusterAdminPolicy` (broad — same scope as the CapstoneAdmin SSO role's existing access entry); tighter scoping deferred to Phase 07 per the spec's resolved Open question #1.
+- **Estimated cost:** $0/mo
+- **Teardown command:** `terraform destroy -target=aws_eks_access_policy_association.gh_actions -target=aws_eks_access_entry.gh_actions` (association first, then entry)
+- **Dependencies:** EKS cluster, gh-actions-deployer IAM Role
+- **Details:** STANDARD type; access scope is `cluster` (not namespace-scoped). No kubeconfig-refresh provisioner needed here — local kubectl access is unaffected; GH Actions builds its own kubeconfig fresh each workflow run.
+
+### GitHub Actions workflow (.github/workflows/deploy.yml)
+- **Type:** GitHub Actions workflow YAML (in repo, not an AWS resource)
+- **Region / account:** GitHub-hosted runners (ubuntu-latest, amd64) / dipptea/sre-capstone repo
+- **Provisioned in:** Phase 03, Milestone 4
+- **Why it exists:** Implements the CI/CD pipeline — `test` job (always), `build-and-push` (push to main only), `deploy` (push to main only, with `helm upgrade --atomic --timeout 5m` for auto-rollback on failure)
+- **Estimated cost:** $0/mo (free minutes for public repos; `ubuntu-latest` runners are free)
+- **Teardown command:** `git rm .github/workflows/deploy.yml && git commit && git push` — stops new pipeline runs immediately
+- **Dependencies:** gh-actions-deployer IAM Role + access entry; ECR `payment-service` repo; EKS cluster; payment Helm chart
+- **Details:** Uses OIDC (no static AWS keys in repo secrets); image tagged with short git SHA (immutable); deploy step uses `--reuse-values` so existing ingress + cert config carries forward across deploys
+
 Format for each entry, when populated:
 
 ```
@@ -252,6 +294,10 @@ Format:
 If the budget is breached or you're stepping away for >2 weeks, this is the safe-stop sequence. Maintain it as you go — at every phase close, verify the steps below would actually take the system to zero spend.
 
 ```
+# 0. Disable the CI pipeline first — stops new pipeline runs while we tear down
+git rm .github/workflows/deploy.yml
+git commit -m "Tear-down: disable CI pipeline" && git push
+
 # 1. Public DNS first — users get clean NXDOMAIN instead of a half-broken ALB
 terraform destroy -target=aws_route53_record.payment
 
@@ -268,8 +314,15 @@ helm uninstall aws-load-balancer-controller -n kube-system
 helm uninstall datadog -n datadog
 kubectl delete namespace payment datadog
 
-# 5. IRSA role for LBC
+# 5a. IRSA role for LBC (Phase 02)
 terraform destroy -target=module.lbc_irsa
+
+# 5b. GitHub Actions IAM resources (Phase 03)
+terraform destroy -target=aws_eks_access_policy_association.gh_actions \
+                  -target=aws_eks_access_entry.gh_actions \
+                  -target=aws_iam_role_policy.gh_actions_deployer \
+                  -target=aws_iam_role.gh_actions_deployer \
+                  -target=aws_iam_openid_connect_provider.github
 
 # 6. Cluster
 terraform destroy -target=module.eks
@@ -300,6 +353,8 @@ Before running `terraform apply` at the start of a phase, ask:
 If the answer to #2 is "no" and #3 is "not sure," **stop and ask the user before applying.** Hitting the soft alert silently is a framework failure, not the user's responsibility.
 
 ## Last updated
+
+2026-05-06 — Phase 03 closed. Added: GitHub Actions OIDC provider, IAM Role `gh-actions-deployer` with minimum-scope inline policy (ECR push + EKS DescribeCluster), EKS access entry granting AmazonEKSClusterAdminPolicy to that role, GitHub Actions workflow `.github/workflows/deploy.yml` with test → build → deploy jobs and `helm --atomic` auto-rollback. All Phase 03 resources $0/mo. ECR storage grew slightly past free-tier 500MB → ~$0.15-0.30/mo. Cumulative cost unchanged at ~$160.50/mo.
 
 2026-05-05 — Phase 02 closed. Added: domain `payservice.click` registration (M1), Route 53 hosted zone (M1), ACM cert (M2), subnet tags (M3), IRSA IAM role + LBC Helm release (M4), ALB via Ingress (M6), Route 53 alias record (M7). Removed: orphan `srelab.click` hosted zone in capstone account (wrong-account cleanup). Cumulative cost ~$160.50/mo while ALB is up; returns to ~$135.50/mo after planned 2-week ALB teardown. Still under $200 soft alert.
 

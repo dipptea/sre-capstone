@@ -4,9 +4,7 @@ Decisions get logged here as they're made. Open questions sit at the top until r
 
 ## Open
 
-### CI/CD: GitHub Actions vs Jenkins
-Pick one, not both. Default to **GitHub Actions** unless the new employer is Jenkins-heavy (common in healthcare/finance/enterprise). Jenkins concepts transfer trivially from GHA.
-- [ ] Resolved: _______ *(Phase 3 decision)*
+_(none currently)_
 
 ## Resolved
 
@@ -20,6 +18,8 @@ Pick one, not both. Default to **GitHub Actions** unless the new employer is Jen
   - **In-cluster workloads (whenever first needed, likely Phase 2 with AWS Load Balancer Controller, or earlier if Datadog AWS integration is added):** IRSA — Kubernetes ServiceAccount mapped to IAM Role via OIDC. No node-wide IAM credentials shared across pods.
 
   Reason: long-lived IAM access keys are the #1 source of AWS breach incidents per AWS's own incident reports; identity-based + STS is the modern best practice across mature shops; setting it up *now* (rather than retrofitting after the first phase ships) builds the muscle and prevents accidental key creation from becoming a habit.
+
+- **2026-05-06: CI/CD tool → GitHub Actions** (over Jenkins). Reason: code already lives in [github.com/dipptea/sre-capstone](https://github.com/dipptea/sre-capstone), zero new infrastructure to provision (no Jenkins server to maintain), native OIDC federation to AWS (per the auth-strategy decision above), and free for public repos at this scale. Jenkins would have added a long-running EC2 instance + ongoing maintenance overhead with no learning benefit for the capstone's specific goals. Concepts transfer cleanly between GHA and Jenkins for future work — pipeline-as-code patterns are nearly identical. Implemented and validated end-to-end in Phase 03 (M1–M7), including a deliberate broken-deploy that auto-rolled-back via `helm --atomic`.
 
 Format for new entries:
 ```

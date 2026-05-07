@@ -4,7 +4,90 @@ Single canonical view of the **cumulative current system state**. Updated at the
 
 For the *delta* introduced by any given phase (and the failure-mode notes for new components), see that phase's spec under [specs/](specs/).
 
-## Phase 02 — current cumulative state
+## Phase 03 — current cumulative state
+
+End-state of Phase 03: Phase 02 + automated CI/CD deploy chain. Pushing to `main` builds, tests, pushes to ECR with an immutable git-SHA tag, and runs `helm upgrade --atomic` against EKS — replacing manual deploys with a hands-free pipeline that auto-rolls back on failure. **User request path is unchanged from Phase 02** — `https://payment.payservice.click/pay` still flows through Route 53 alias → ALB → pod.
+
+![Phase 03 architecture — end-to-end flow (overview)](docs/diagrams/phase-03-architecture.png)
+
+*Overview above shows the two parallel flows: **user request flow** (top, Phase 01+02, unchanged) and **CI/CD deploy flow** (bottom, Phase 03, new). The detailed diagram below shows the cumulative AWS topology with the CI/CD pipeline as a vertical add-on on the right.*
+
+![Phase 03 architecture — detailed cumulative view](docs/diagrams/phase-03-architecture-detail.png)
+
+*Mermaid version below for source-controlled editing — focuses on the deploy flow specifically.*
+
+```mermaid
+flowchart LR
+    dev["💻 Developer<br/>git push origin main"]
+
+    subgraph github["GitHub (external to AWS)"]
+        repo["Repo<br/>dipptea/sre-capstone"]
+        gha["GitHub Actions<br/>ubuntu-latest (amd64)"]
+    end
+
+    subgraph awsregion["☁️ AWS · us-east-1 · 591316258137"]
+        ghoidc["GitHub OIDC provider<br/>token.actions.githubusercontent.com"]
+        ghrole["IAM Role: gh-actions-deployer<br/>trust: repo+main only"]
+        ecr[("ECR<br/>payment-service:&lt;git-sha&gt;")]
+        eks["EKS API Server"]
+        pod["payment pod<br/>(private subnet)"]
+        alb["ALB (Phase 02)"]
+    end
+
+    user["🌐 Public user"]
+
+    %% Deploy flow (NEW Phase 03)
+    dev ==>|"① git push"| repo
+    repo ==>|"② triggers workflow"| gha
+    gha -.->|"③ request OIDC token"| ghoidc
+    ghoidc -.->|"trusts"| ghrole
+    ghrole -.->|"AssumeRoleWithWebIdentity"| gha
+    gha ==>|"④ docker push :git-sha"| ecr
+    gha ==>|"⑤ helm upgrade --atomic"| eks
+    eks -.->|"rolling restart"| pod
+    pod -.->|"pull new image"| ecr
+
+    %% User flow (carried over from Phase 02 — unchanged)
+    user ==>|"HTTPS (after deploy)"| alb
+    alb ==>|"unchanged from Phase 02"| pod
+```
+
+### Components by layer (cumulative)
+
+All Phase 01–02 categories carry over unchanged — see [Phase 02 baseline](#phase-02-baseline-kept-for-comparison) section below for the full list (Network, Compute, Observability, Application, Public ingress).
+
+**Deploy automation (Phase 03)**
+- GitHub Actions workflow `.github/workflows/deploy.yml` — three jobs: `test` (always), `build-and-push` (push to main only), `deploy` (push to main only, `helm upgrade --install --atomic --timeout 5m`)
+- IAM OIDC provider for `token.actions.githubusercontent.com` (alongside the existing EKS OIDC provider — separate AWS resources, different issuers)
+- IAM Role `gh-actions-deployer` — trust policy locked via `StringEquals` on `sub:repo:dipptea/sre-capstone:ref:refs/heads/main`
+- Inline IAM policy `gh-actions-deployer-permissions`: ECR push verbs (scoped to `payment-service` repo), `ecr:GetAuthorizationToken` (resource `*`, AWS API limitation), `eks:DescribeCluster` (scoped to `capstone-sre-cluster`). No S3, no Secrets Manager, no general read.
+- EKS access entry granting `AmazonEKSClusterAdminPolicy` to the role (broad scope, parallel to CapstoneAdmin SSO role's existing access entry; tighter scoping deferred to Phase 07)
+- Image tagging: short git SHA (7 chars), immutable in ECR (lifecycle keeps last 10)
+- AWS auth: OIDC only — no static AWS keys stored in GitHub repository secrets
+
+### Request flow
+
+The "request" this phase introduced is a **deploy** (the user-request path is unchanged from Phase 02). End-to-end deploy on push to main:
+
+1. **Developer pushes to main** — GitHub triggers the workflow on `ubuntu-latest` (amd64).
+2. **Test job runs** — `pytest` (smoke test) + `docker build` validation. Fails fast on any test failure; if it fails, `build-and-push` and `deploy` jobs don't run.
+3. **Workflow assumes IAM role via OIDC** — `AssumeRoleWithWebIdentity` with the GitHub OIDC token. STS validates the `sub` claim matches `repo:dipptea/sre-capstone:ref:refs/heads/main`. Returns short-lived (~15 min) AWS credentials.
+4. **Build & push** — image tagged with the commit's short SHA, pushed to ECR.
+5. **Deploy** — `aws eks update-kubeconfig` then `helm upgrade --install --atomic --timeout 5m --set image.tag=<sha>`. Helm rolls out new pod alongside old; readiness probes hit `/health`.
+6. **If new pod becomes Ready within 5 min** → old pod terminated, new pod serves traffic. Workflow ✅ green.
+7. **If new pod fails to become Ready within 5 min** → Helm `--atomic` triggers automatic rollback to previous revision. Old pod keeps serving. Workflow ❌ red. **Public endpoint never goes down.**
+
+**Pull request flow** (validated in Phase 03 M5): on `pull_request` event, only the `test` job runs; `build-and-push` and `deploy` are skipped via `if: github.event_name == 'push' && github.ref == 'refs/heads/main'`. Provides PR-level CI signal without shipping anything.
+
+**New failure-modes (Phase 03):**
+
+- **GitHub OIDC thumbprint stale** — if GitHub rotates their TLS cert and `terraform apply` hasn't been re-run since, the `tls_certificate` data source's value freezes the old thumbprint in the AWS OIDC provider. Result: silent `AccessDenied` on every `AssumeRoleWithWebIdentity`. Fix: `cd infra && terraform apply` to refresh.
+- **Trust policy `sub` mismatch** — feature branches and PR-from-fork commits cannot assume the role (intentional). If you ever need to deploy from a non-main branch (e.g., emergency hotfix), use the documented break-glass: manual `helm upgrade` from operator laptop with the CapstoneAdmin SSO role.
+- **Test gate flake** — a flaky test on `main` blocks all deploys until fixed/quarantined. Treat test flake as a real bug (don't `--no-verify` past it); the gate's value is its credibility.
+
+---
+
+## Phase 02 baseline (kept for comparison)
 
 End-state of Phase 02: Phase 01 + public HTTPS via ALB. Public users hit `https://payment.payservice.click/pay` from any laptop on the internet → 200, with no `--insecure` flag, observable end-to-end in Datadog APM and Logs.
 
@@ -226,6 +309,8 @@ End-to-end trace path for a `curl POST /pay` (verified in Phase 01 Milestone 7):
 Maintenance rules live in [`CLAUDE.md`](CLAUDE.md) (hard rule #4 + `/phase-close` flow). This file is updated at phase close — see CLAUDE.md for the full list of phase-close gates.
 
 ## Last updated
+
+2026-05-06 — Phase 03 closed. Added: GitHub Actions OIDC provider, IAM Role `gh-actions-deployer` with minimum-scope inline policy (ECR push + EKS DescribeCluster), EKS access entry granting cluster-admin RBAC, GitHub Actions workflow `.github/workflows/deploy.yml` with test → build → deploy jobs and `helm --atomic` auto-rollback. CI/CD pipeline validated end-to-end including a deliberate broken-deploy test that auto-rolled-back without dropping the public endpoint. User request path unchanged from Phase 02.
 
 2026-05-05 — Phase 02 closed. Added: Route 53 alias + ACM cert + AWS Application Load Balancer + AWS Load Balancer Controller (with IRSA) + subnet tags. Public HTTPS path now the primary user request path; kubectl port-forward retained as ops fallback for debugging.
 
