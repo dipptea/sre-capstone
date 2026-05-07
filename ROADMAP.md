@@ -2,8 +2,8 @@
 
 ## STATUS
 
-- **Current phase:** 03b — Second downstream service + cross-service tracing (spec approved, ready for implementation)
-- **Last completed phase:** 03 — CI/CD pipeline (closed 2026-05-07)
+- **Current phase:** 04 — HA / scaling (HPA, PDB, probes, load test) (pending — run `/spec-new 04` to start)
+- **Last completed phase:** 03b — Second downstream service + cross-service tracing (closed 2026-05-07)
 - **Last updated:** 2026-05-07
 
 _This section is updated by `/spec-new` and `/phase-close`. Manual edits are fine._

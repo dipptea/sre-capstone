@@ -4,7 +4,91 @@ Single canonical view of the **cumulative current system state**. Updated at the
 
 For the *delta* introduced by any given phase (and the failure-mode notes for new components), see that phase's spec under [specs/](specs/).
 
-## Phase 03 — current cumulative state
+## Phase 03b — current cumulative state
+
+End-state of Phase 03b: Phase 03 + a second internal service `risk-check-service` that `payment-service` calls synchronously during `/pay`. Datadog APM now shows ONE distributed trace spanning BOTH services with parent-child span relationships — establishes the foundation for Phase 06 downstream-service latency/failure drills. **User-facing request path is unchanged from Phase 02** — `curl https://payment.payservice.click/pay` still hits the ALB → payment pod; the new behavior is invisible to external callers (the response just gains a `risk` field).
+
+![Phase 03b architecture — overview](docs/diagrams/phase-03b-architecture.png)
+
+*Overview above is the high-level visual. The detailed diagram below shows the cumulative AWS topology with both microservices, both CI/CD pipelines, the cross-service call, and the failure-rollback example.*
+
+![Phase 03b architecture — detailed cumulative view](docs/diagrams/phase-03b-architecture-detail.png)
+
+*Mermaid version below for source-controlled editing — focuses on the cross-service call + deploy flow specifically.*
+
+```mermaid
+flowchart TB
+    user["🌐 Public user"]
+    alb["ALB (Phase 02 — unchanged)"]
+
+    subgraph cluster["EKS cluster · capstone-sre-cluster"]
+        subgraph payns["Namespace: payment"]
+            ppod["payment-service pod<br/>FastAPI + ddtrace + httpx<br/>(modified: calls risk-check)"]
+        end
+        subgraph riskns["🆕 Namespace: risk-check"]
+            rpod["🆕 risk-check-service pod<br/>FastAPI + ddtrace<br/>POST /check → {risk: low|high}"]
+        end
+        ddA["Datadog agent (DaemonSet — Phase 01)"]
+    end
+
+    subgraph awsregion["AWS · us-east-1"]
+        ecr1[("ECR: payment-service (Phase 01)")]
+        ecr2[("🆕 ECR: risk-check-service")]
+        gha["GitHub Actions (Phase 03)"]
+    end
+
+    ddsaas[("Datadog SaaS<br/>parent-child trace visible here")]
+
+    user ==>|"HTTPS /pay"| alb
+    alb ==>|"forwards"| ppod
+    ppod ==>|"🆕 POST /check<br/>via cluster DNS<br/>+ W3C Trace Context headers<br/>(auto-injected by ddtrace)"| rpod
+
+    ppod -.->|"parent span"| ddA
+    rpod -.->|"🆕 child span"| ddA
+    ddA --> ddsaas
+
+    gha -.->|"deploy-payment.yml<br/>(path filter: services/payment/**)"| ppod
+    gha -.->|"🆕 deploy-risk-check.yml<br/>(path filter: services/risk-check/**)"| rpod
+    gha -.-> ecr1
+    gha -.-> ecr2
+
+    classDef new stroke:#ff8c00,stroke-width:3px
+    class riskns,rpod,ecr2 new
+```
+
+### Components by layer (cumulative)
+
+All Phase 01–03 categories carry over unchanged — see [Phase 03 baseline](#phase-03-baseline-kept-for-comparison) section below for full list (Network, Compute, Observability, Application, Public ingress, Deploy automation).
+
+**Cross-service tracing (Phase 03b)**
+- New service: `risk-check-service` (FastAPI, single replica) — synthetic risk decision; always returns `{"risk": "low"}` for Phase 03b (per resolved Open Q #1).
+- New namespace: `risk-check` (separate from `payment`).
+- New ECR repo: `risk-check-service` with the same lifecycle policy + IMMUTABLE tags + scan-on-push as payment.
+- New Helm chart: `helm/risk-check/` (Deployment + Service + ServiceAccount + ConfigMap; **no Ingress** — internal service only).
+- New CI/CD workflow: `.github/workflows/deploy-risk-check.yml` with path filters scoped to `services/risk-check/**` and `helm/risk-check/**`. Existing `deploy.yml` renamed to `deploy-payment.yml` and given symmetric path filters.
+- IAM: existing `gh-actions-deployer` role's inline policy extended to permit ECR push to BOTH repos (no new role; one CI role serves both services).
+- Cross-service call: `payment-service` calls `risk-check-service` synchronously via cluster DNS (`risk-check-service.risk-check.svc.cluster.local`) during `/pay` handling, with a 2-second timeout (`httpx.post(timeout=2.0)`).
+- Trace propagation: dd-trace SDK auto-injects W3C `traceparent` and `tracestate` headers into the outgoing httpx call; risk-check's dd-trace reads them and creates a child span linked to payment's parent span.
+
+### Request flow
+
+End-to-end path for `POST /pay` now spans two services:
+
+1. **DNS + TLS + ALB** — unchanged from Phase 02 (Route 53 alias → ALB :443 → ACM cert validates → ALB forwards to payment pod IP on :8080).
+2. **payment-service receives /pay** — generates `payment_id`, dd-trace span begins (parent).
+3. **payment-service calls risk-check** — `httpx.post("http://risk-check-service.risk-check.svc.cluster.local/check", json={"payment_id": ...}, timeout=2.0)`. dd-trace auto-injects `traceparent` header into the outgoing request.
+4. **risk-check-service receives /check** — dd-trace reads the `traceparent` header, creates a span whose `parent_id` matches payment's span. Returns `{"risk": "low"}`.
+5. **payment-service returns to user** — combines `payment_id` + `risk` into response JSON, returns 200 OK to the ALB → laptop.
+6. **Async telemetry** — both spans ship to Datadog agent → Datadog SaaS, which assembles them into one distributed trace based on shared `trace_id` and parent-child `span_id` references.
+
+**Failure-mode addition (Phase 03b):**
+
+- **Synchronous coupling = cascading failure risk.** If `risk-check-service` is down or slow, `payment-service`'s `/pay` either times out (after 2s) or returns 500. The 2s timeout is a floor (prevents indefinite hang), not isolation (no graceful degradation yet). Phase 06 explores retries, circuit breakers, and graceful fallback.
+- **Trace propagation broken silently.** If risk-check's Dockerfile loses its `ddtrace-run` wrapper, payment + risk-check still work end-to-end, but Datadog shows them as TWO unrelated traces instead of ONE parent-child trace. Diagnostic: search Datadog APM by `service:risk-check-service` — if traces appear there but `parent_id` is null/missing, propagation is broken.
+
+---
+
+## Phase 03 baseline (kept for comparison)
 
 End-state of Phase 03: Phase 02 + automated CI/CD deploy chain. Pushing to `main` builds, tests, pushes to ECR with an immutable git-SHA tag, and runs `helm upgrade --atomic` against EKS — replacing manual deploys with a hands-free pipeline that auto-rolls back on failure. **User request path is unchanged from Phase 02** — `https://payment.payservice.click/pay` still flows through Route 53 alias → ALB → pod.
 
@@ -309,6 +393,8 @@ End-to-end trace path for a `curl POST /pay` (verified in Phase 01 Milestone 7):
 Maintenance rules live in [`CLAUDE.md`](CLAUDE.md) (hard rule #4 + `/phase-close` flow). This file is updated at phase close — see CLAUDE.md for the full list of phase-close gates.
 
 ## Last updated
+
+2026-05-07 — Phase 03b closed. Added: `risk-check-service` (new FastAPI service in `risk-check` namespace, 1 replica, synthetic always-low risk decision); new ECR repo + extended `gh-actions-deployer` inline policy to push both repos; new Helm chart `helm/risk-check/`; new CI/CD workflow `.github/workflows/deploy-risk-check.yml` with path filters for per-service deploy independence; existing `deploy.yml` renamed to `deploy-payment.yml` with symmetric path filters; payment-service modified to call risk-check synchronously via cluster DNS with 2s timeout. Datadog APM now shows distributed parent-child trace across both services. Cumulative cost unchanged (~$160.50/mo).
 
 2026-05-06 — Phase 03 closed. Added: GitHub Actions OIDC provider, IAM Role `gh-actions-deployer` with minimum-scope inline policy (ECR push + EKS DescribeCluster), EKS access entry granting cluster-admin RBAC, GitHub Actions workflow `.github/workflows/deploy.yml` with test → build → deploy jobs and `helm --atomic` auto-rollback. CI/CD pipeline validated end-to-end including a deliberate broken-deploy test that auto-rolled-back without dropping the public endpoint. User request path unchanged from Phase 02.
 

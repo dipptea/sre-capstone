@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$160.50/mo** — Phase 03 complete (CI/CD pipeline). Phase 02 baseline ~$160.50/mo unchanged. **Phase 03 added $0/mo** — GitHub OIDC provider, IAM Role for GH Actions, EKS access entry, and GitHub Actions workflow are all free (IAM has no cost; GitHub Actions on public-repo runners is free). ECR storage grew from 1 to 7 images (~2 GB), slightly over the always-free 500 MB tier → **~$0.15-0.30/mo** for ECR storage when AWS bills it. Negligible but no longer literally zero. **ALB still scheduled for teardown after 2-week test horizon.** Domain `payservice.click` $3 one-time, auto-renew DISABLED.
+**~$160.50/mo** — Phase 03b complete (second service + cross-service tracing). Phase 03 baseline ~$160.50/mo unchanged. **Phase 03b added $0/mo** — `risk-check-service` runs on existing t3.medium nodes (no new EC2), runs in its own `risk-check` namespace (free), uses a separate ECR repo (storage adds <$0.10/mo at this scale; ECR was already slightly over free-tier from Phase 03's image churn). New Helm chart, new CI/CD workflow, IAM policy extension on existing role — all free. **ALB still scheduled for teardown after 2-week test horizon.** Domain `payservice.click` $3 one-time, auto-renew DISABLED.
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -255,15 +255,47 @@ Update this number whenever resources change. Treat the soft alert as "investiga
 - **Dependencies:** EKS cluster, gh-actions-deployer IAM Role
 - **Details:** STANDARD type; access scope is `cluster` (not namespace-scoped). No kubeconfig-refresh provisioner needed here — local kubectl access is unaffected; GH Actions builds its own kubeconfig fresh each workflow run.
 
-### GitHub Actions workflow (.github/workflows/deploy.yml)
+### GitHub Actions workflow: deploy-payment.yml
 - **Type:** GitHub Actions workflow YAML (in repo, not an AWS resource)
 - **Region / account:** GitHub-hosted runners (ubuntu-latest, amd64) / dipptea/sre-capstone repo
-- **Provisioned in:** Phase 03, Milestone 4
-- **Why it exists:** Implements the CI/CD pipeline — `test` job (always), `build-and-push` (push to main only), `deploy` (push to main only, with `helm upgrade --atomic --timeout 5m` for auto-rollback on failure)
-- **Estimated cost:** $0/mo (free minutes for public repos; `ubuntu-latest` runners are free)
-- **Teardown command:** `git rm .github/workflows/deploy.yml && git commit && git push` — stops new pipeline runs immediately
+- **Provisioned in:** Phase 03 Milestone 4 (originally `deploy.yml`); renamed in **Phase 03b Milestone 5** with path filters added
+- **Why it exists:** CI/CD pipeline for `payment-service` — `test` job (always), `build-and-push` + `deploy` (push to main only, gated by path filter)
+- **Estimated cost:** $0/mo (free minutes for public repos)
+- **Teardown command:** `git rm .github/workflows/deploy-payment.yml && git commit && git push`
 - **Dependencies:** gh-actions-deployer IAM Role + access entry; ECR `payment-service` repo; EKS cluster; payment Helm chart
-- **Details:** Uses OIDC (no static AWS keys in repo secrets); image tagged with short git SHA (immutable); deploy step uses `--reuse-values` so existing ingress + cert config carries forward across deploys
+- **Path filter (Phase 03b):** triggers on `services/payment/**`, `helm/payment/**`, `.github/workflows/deploy-payment.yml`. A change scoped to `services/risk-check/**` does NOT trigger this workflow.
+
+### ECR Repository: risk-check-service
+- **Type:** AWS ECR (Elastic Container Registry)
+- **Region / account:** us-east-1 / 591316258137
+- **Provisioned in:** Phase 03b, Milestone 2
+- **Why it exists:** Stores the `risk-check-service` container image with IMMUTABLE git-SHA tags. Mirrors `payment-service` repo's pattern. Per-service repos give each service its own image lifecycle.
+- **Estimated cost:** $0/mo (well under 500MB free tier for ECR storage; lifecycle policy keeps last 10 images)
+- **Teardown command:** `terraform destroy -target=aws_ecr_lifecycle_policy.risk_check -target=aws_ecr_repository.risk_check` (lifecycle policy first; ECR repo destroy fails if images exist — `aws ecr batch-delete-image` first if needed)
+- **Dependencies:** None (standalone)
+- **Details:** IMMUTABLE tag mutability, scan-on-push enabled, AES256 encryption, lifecycle policy: `imageCountMoreThan 10 → expire`
+- **URL:** 591316258137.dkr.ecr.us-east-1.amazonaws.com/risk-check-service
+
+### risk-check-service (Helm release in Kubernetes)
+- **Type:** Helm release (`risk-check-service`) deploying FastAPI service (Deployment + Service + ServiceAccount + ConfigMap)
+- **Region / account:** Namespace `risk-check` in cluster capstone-sre-cluster (us-east-1) / 591316258137
+- **Provisioned in:** Phase 03b, Milestones 3 + 6
+- **Why it exists:** Synchronous downstream service called by `payment-service` during `/pay`. Demonstrates cross-service distributed tracing in Datadog APM (parent-child span relationship). Foundation for Phase 06's "slow downstream service" failure drill.
+- **Estimated cost:** $0/mo incremental (runs on existing t3.medium nodes; uses existing ECR repo storage)
+- **Teardown command:** `helm uninstall risk-check-service -n risk-check && kubectl delete namespace risk-check`
+- **Dependencies:** EKS cluster, ECR image `risk-check-service:<git-sha>`, Datadog agent (for trace shipping); deployed via `deploy-risk-check.yml` workflow
+- **Details:** 1 replica, port 80→8080, ClusterIP service (internal-only — no Ingress), `/health` readiness+liveness probes, `ddtrace-run` entrypoint with `DD_SERVICE=risk-check-service`, synthetic always-`low` risk decision (per Phase 03b resolved Open Q #1)
+- **Cluster DNS:** `risk-check-service.risk-check.svc.cluster.local:80`
+
+### GitHub Actions workflow: deploy-risk-check.yml
+- **Type:** GitHub Actions workflow YAML (in repo, not an AWS resource)
+- **Region / account:** GitHub-hosted runners / dipptea/sre-capstone repo
+- **Provisioned in:** Phase 03b, Milestone 5
+- **Why it exists:** CI/CD pipeline for `risk-check-service`, mirroring `deploy-payment.yml`. Per-service workflow + path filter = independent deploys (a payment-only change doesn't redeploy risk-check, and vice versa).
+- **Estimated cost:** $0/mo (free minutes for public repos)
+- **Teardown command:** `git rm .github/workflows/deploy-risk-check.yml && git commit && git push`
+- **Dependencies:** gh-actions-deployer IAM Role + access entry (extended in Phase 03b to cover `risk-check-service` ECR repo); risk-check Helm chart; EKS cluster
+- **Path filter (Phase 03b):** triggers on `services/risk-check/**`, `helm/risk-check/**`, `.github/workflows/deploy-risk-check.yml`.
 
 Format for each entry, when populated:
 
@@ -310,9 +342,10 @@ terraform destroy -target=aws_acm_certificate_validation.payment -target=aws_acm
 
 # 4. Helm releases (apps, LBC, observability)
 helm uninstall payment -n payment
+helm uninstall risk-check-service -n risk-check
 helm uninstall aws-load-balancer-controller -n kube-system
 helm uninstall datadog -n datadog
-kubectl delete namespace payment datadog
+kubectl delete namespace payment risk-check datadog
 
 # 5a. IRSA role for LBC (Phase 02)
 terraform destroy -target=module.lbc_irsa
@@ -353,6 +386,8 @@ Before running `terraform apply` at the start of a phase, ask:
 If the answer to #2 is "no" and #3 is "not sure," **stop and ask the user before applying.** Hitting the soft alert silently is a framework failure, not the user's responsibility.
 
 ## Last updated
+
+2026-05-07 — Phase 03b closed. Added: `risk-check-service` ECR repo, `risk-check-service` Helm release in `risk-check` namespace, `deploy-risk-check.yml` workflow. Renamed `deploy.yml` → `deploy-payment.yml` and added path filters to both workflows. Extended `gh-actions-deployer` inline policy to cover both ECR repos. Cumulative cost unchanged at ~$160.50/mo (new service runs on existing nodes; ECR storage adds <$0.10/mo).
 
 2026-05-06 — Phase 03 closed. Added: GitHub Actions OIDC provider, IAM Role `gh-actions-deployer` with minimum-scope inline policy (ECR push + EKS DescribeCluster), EKS access entry granting AmazonEKSClusterAdminPolicy to that role, GitHub Actions workflow `.github/workflows/deploy.yml` with test → build → deploy jobs and `helm --atomic` auto-rollback. All Phase 03 resources $0/mo. ECR storage grew slightly past free-tier 500MB → ~$0.15-0.30/mo. Cumulative cost unchanged at ~$160.50/mo.
 

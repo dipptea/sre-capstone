@@ -365,6 +365,97 @@ kubectl get pods -n payment -o jsonpath='{.items[*].spec.containers[*].image}{"\
 ```
 Kubernetes pod is now running: `payment-service:09e251c`
 
+## Deploy Phase 03b — Second downstream service + cross-service tracing
+
+### Milestone 1: Create the new risk-check app
+
+**Dockerfile**: This Dockerfile creates a container image for the risk-check-service by installing Python and all required FastAPI libraries, then copying the application code into the container. When the container starts, it runs the FastAPI app on port 8080 with Datadog tracing enabled through `ddtrace-run`.
+
+**requirements.txt**: This file contains the Python libraries needed for the risk-check-service. During the Docker build, these packages are installed so the application, logging, Datadog tracing, and web server can run properly.
+
+**conftest.py**: This file helps pytest find and import the application files correctly during testing. It adds the current project folder to Python's path so test files can import things like `app.main` without import errors.
+
+**test_smoke.py**: This is a basic health check test to confirm the app can start properly. Can Python load `app.main` successfully? Can FastAPI create the app object successfully?
+
+### Milestone 2: Create its ECR repo and give GitHub Actions permission to push to it
+
+**ecr.tf**: This Terraform code creates a secure AWS ECR repository for storing risk-check-service Docker images, automatically scans them for vulnerable software packages, keeps only the latest 10 images, and outputs the repository URL for deployments. (This Terraform code creates a new AWS ECR repository for storing Docker images of the risk-check-service.)
+
+**github_actions.tf**: This IAM policy allows GitHub Actions to upload Docker images only to the payment-service and risk-check-service ECR repositories. (This section gives GitHub Actions permission to push Docker images into your AWS ECR repositories.)
+
+### Milestone 3: Create Helm chart so Kubernetes can run it
+
+**Chart.yaml**: This file defines the Helm chart information for deploying the risk-check-service application into Kubernetes/EKS.
+
+**values.yaml**: Helm reads this file to know which image to run, how many pods to create, ports, Datadog settings, and pod resource limits.
+
+**_helpers.tpl**: This file creates reusable Helm naming functions (Deployment name, Service name, ConfigMap name) so Kubernetes resources get consistent, valid names automatically.
+
+**configmap.yaml**: This ConfigMap passes variables from Kubernetes → into the risk-check-service container during pod start up.
+
+**serviceaccount.yaml**: This file creates a Kubernetes ServiceAccount for the risk-check-service pod. (A ServiceAccount gives a pod an identity inside Kubernetes so Kubernetes can manage and recognize the application properly.)
+
+**service.yaml**: This file creates an internal Kubernetes networking endpoint so payment-service can communicate with risk-check-service inside the EKS cluster.
+
+**deployment.yaml**: Creates 1 risk-check pod, uses the Docker image from ECR, runs it on port 8080, adds Datadog tracing/log settings, checks `/health` to know if pod is healthy, applies CPU/memory limits.
+
+### Milestone 4: Change payment-service so it calls risk-check-service
+
+**requirements.txt**: payment-service can now send HTTP requests to risk-check-service.
+
+**main.py**: payment-service calls risk-check-service inside EKS (sending the `payment_id`) and waits up to 2 seconds for a response. Datadog automatically traces both services together as one distributed request.
+
+### Milestone 5: Add/adjust GitHub Actions workflows for both services
+
+**deploy-payment.yml**
+
+Phase 03b updated the payment-service workflow so payment deploys only when payment-related files change, allowing payment-service and risk-check-service to deploy independently.
+
+When payment-service related files change and are pushed to the main branch, GitHub Actions automatically starts the CI/CD pipeline. If only risk-check-service files change, this payment pipeline does not run because path filters keep both service deployments independent.
+
+If a Pull Request is created, GitHub Actions runs only the tests to safely verify the code before merging into main.
+
+For deployments, GitHub Actions uses OIDC temporary tokens to securely access AWS without storing AWS access keys in GitHub.
+
+The pipeline then tests the application, builds a Docker image, tags the image using the short Git commit SHA, and pushes the image to AWS ECR.
+
+After the image is successfully pushed, Helm deploys the new image into EKS.
+
+If the deployment fails or health checks fail, Helm automatically rolls back to the previous healthy version to avoid breaking the application.
+
+**deploy-risk-check.yml**
+
+When risk-check related files change and are pushed to the main branch, GitHub Actions automatically starts the CI/CD pipeline. If only risk-check-service files change, the payment-service pipeline does not run because path filters keep both service deployments independent.
+
+If a Pull Request is created, GitHub Actions runs only the tests to safely verify the code before merging into main.
+
+For deployments, GitHub Actions uses OIDC temporary tokens to securely access AWS without storing AWS access keys in GitHub.
+
+The pipeline then tests the application, builds a Docker image, tags the image using the short Git commit SHA, and pushes the image to AWS ECR.
+
+After the image is successfully pushed, Helm deploys the new image into EKS in the `risk-check` namespace.
+
+If the deployment fails or health checks fail, Helm automatically rolls back to the previous healthy version to avoid breaking the application.
+
+### Milestone 6: Deploy risk-check-service through CI/CD
+
+Add + staged all Phase 03b changes for commit. Pushed to GitHub main successfully.
+
+### Milestone 7: Verify Datadog shows one trace across both services
+
+Send an HTTP request to the public payment endpoint.
+
+```
+curl -X POST https://payment.payservice.click/pay
+```
+
+Open Datadog → APM → Traces:
+
+```
+search: service:payment-service env:capstone
+        service:payment-service env:capstone resource_name:"POST /pay"
+```
+
 ## Common operations
 
 _(kubectl shortcuts, Datadog dashboard links, AWS console deep-links)_

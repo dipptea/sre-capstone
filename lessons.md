@@ -41,3 +41,15 @@ _(entries start here)_
 **What surprised me / what I got wrong:** Learned that Helm `--atomic` can automatically roll back failed deployments while the old healthy pod continues serving users without downtime. Another thing I learned was the difference between `git` and `gh`: `git` manages code history locally (commit, branch, merge), while `gh` interacts with GitHub platform features like Pull Requests, GitHub Actions workflows, and workflow runs directly from the terminal. Also learned that pushing to a PR only runs the test job, while pushing to main runs the full deployment. OIDC providers create identity tokens, and AWS IAM roles only allow tokens from trusted providers like GitHub or EKS.
 
 **How I'd explain it to a peer:** I built a GitHub Actions pipeline that automatically tests, builds, pushes Docker images to ECR, and deploys to EKS using Helm whenever code is pushed to the main branch. PRs only run validation tests for safety. I also intentionally broke the /health endpoint to simulate a bad deployment and verified that Kubernetes readiness probes failed, Helm automatically rolled back to the previous healthy version, and the public API continued working throughout the failure.
+
+## 2026-05-07 — Phase 03b: Cross-service distributed tracing + warehouse-and-access-card sequencing
+
+**What I did:** Added another microservice called `risk-check-service`. Both services have separate traces and deployments, but both Docker images used the same Git SHA because they were deployed from the same commit.
+
+**What surprised me / what I got wrong:** Terraform infrastructure changes should be applied before triggering the application deployment pipeline, because the risk-check ECR repository and IAM permissions must already exist before GitHub Actions can successfully push the Docker image and deploy the service.
+
+**How I'd explain it to a peer:** In this phase we expanded the application by adding another microservice called `risk-check-service`. This service can later be used for checking fraud risk, transaction risk, amount risk, location risk, or user risk, making the architecture more realistic for future failure-testing phases.
+
+We created a separate service, Docker image, Helm chart, ECR repository, and GitHub Actions CI/CD pipeline for risk-check-service. Now, when payment-service files change, only the payment CI/CD pipeline runs, and when risk-check-service files change, only the risk-check pipeline runs. Both services can still share the same Git SHA when deployed from the same commit.
+
+When a user sends a payment request, payment-service receives the request and internally calls risk-check-service inside EKS while sending the `payment_id`. If risk-check-service responds successfully, the response returns back to payment-service and then to the user. Datadog traces both services together, where payment-service appears as the parent span and risk-check-service appears as the child span in the distributed trace.
