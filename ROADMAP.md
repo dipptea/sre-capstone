@@ -2,7 +2,7 @@
 
 ## STATUS
 
-- **Current phase:** 03b — Second downstream service + cross-service tracing (pending — run `/spec-new 03b` to start)
+- **Current phase:** 03b — Second downstream service + cross-service tracing (spec approved, ready for implementation)
 - **Last completed phase:** 03 — CI/CD pipeline (closed 2026-05-07)
 - **Last updated:** 2026-05-07
 
