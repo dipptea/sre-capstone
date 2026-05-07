@@ -1,7 +1,7 @@
 ---
 phase: 03b
 title: Second downstream service + cross-service tracing
-status: approved  # draft | approved | in-progress | blocked | done | abandoned
+status: in-progress  # draft | approved | in-progress | blocked | done | abandoned
 created: 2026-05-07
 approved: 2026-05-07
 ---

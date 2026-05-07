@@ -1,0 +1,27 @@
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+service:
+  port: 80
+  targetPort: 8080
+  type: ClusterIP
+
+datadog:
+  enabled: true
+  agentHost: "datadog.datadog.svc.cluster.local"
+  service: "risk-check-service"
+  env: "capstone"
+  version: "0.1.0"
+  traceEnabled: "true"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

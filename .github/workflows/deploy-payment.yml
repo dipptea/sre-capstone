@@ -1,9 +1,12 @@
-# Phase 03 — CI/CD pipeline for payment-service.
+# Phase 03 + 03b — CI/CD pipeline for payment-service.
 #
-# Triggers:
-#   - push to main: full pipeline (test → build & push to ECR → deploy to EKS)
-#   - pull_request: tests only (no ECR push, no deploy)
-#   - workflow_dispatch: manual trigger from the Actions UI
+# Triggers (path filters added in Phase 03b for per-service deploy independence):
+#   - push to main + payment paths changed: full pipeline (test → build → push → deploy)
+#   - pull_request + payment paths changed: tests only (no push, no deploy)
+#   - workflow_dispatch: manual trigger from the Actions UI (no path filter — manual override)
+#
+# Path filter ensures a change to services/risk-check/** does NOT trigger this pipeline.
+# Symmetric setup in deploy-risk-check.yml means risk-check changes don't trigger payment.
 #
 # AWS auth: OIDC (no static keys). Trust policy on gh-actions-deployer locks
 # AssumeRoleWithWebIdentity to pushes from this repo's main branch only.
@@ -16,7 +19,15 @@ name: Deploy payment-service
 on:
   push:
     branches: [main]
+    paths:
+      - 'services/payment/**'
+      - 'helm/payment/**'
+      - '.github/workflows/deploy-payment.yml'
   pull_request:
+    paths:
+      - 'services/payment/**'
+      - 'helm/payment/**'
+      - '.github/workflows/deploy-payment.yml'
   workflow_dispatch:
 
 env:

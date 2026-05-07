@@ -80,9 +80,10 @@ resource "aws_iam_role" "gh_actions_deployer" {
 # EKS access entry in Milestone 3, NOT in this IAM policy.
 
 data "aws_iam_policy_document" "gh_actions_permissions" {
-  # ECR push verbs — scoped to payment-service repo only.
+  # ECR push verbs — scoped to the project's service repos.
+  # Phase 03 added payment; Phase 03b extended to risk-check.
   statement {
-    sid    = "EcrPushToPaymentServiceRepo"
+    sid    = "EcrPushToServiceRepos"
     effect = "Allow"
     actions = [
       "ecr:BatchCheckLayerAvailability",
@@ -91,7 +92,10 @@ data "aws_iam_policy_document" "gh_actions_permissions" {
       "ecr:PutImage",
       "ecr:UploadLayerPart",
     ]
-    resources = [aws_ecr_repository.payment.arn]
+    resources = [
+      aws_ecr_repository.payment.arn,
+      aws_ecr_repository.risk_check.arn,
+    ]
   }
 
   # ECR GetAuthorizationToken — cannot be scoped to a repo (AWS API limitation).
