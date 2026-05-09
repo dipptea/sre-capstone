@@ -54,21 +54,28 @@ spec:
           value: "8126"
         - name: DD_LOGS_INJECTION
           value: "true"
+        # Probes — Phase 04 M5. Lifecycle order: startup gates → readiness +
+        # liveness run concurrently after. No initialDelaySeconds on liveness;
+        # startup probe is the boot-gate now. Mirrors payment-service per Decision 5.
+        startupProbe:
+          httpGet:
+            path: {{ .Values.probes.startup.path }}
+            port: http
+          periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+          failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
         readinessProbe:
           httpGet:
-            path: /health
+            path: {{ .Values.probes.readiness.path }}
             port: http
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          timeoutSeconds: 2
-          successThreshold: 1
-          failureThreshold: 3
+          periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
         livenessProbe:
           httpGet:
-            path: /health
+            path: {{ .Values.probes.liveness.path }}
             port: http
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          timeoutSeconds: 2
-          failureThreshold: 3
+          periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
         resources: {{ toYaml .Values.resources | nindent 10 }}

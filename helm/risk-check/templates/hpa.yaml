@@ -1,0 +1,26 @@
+{{- if .Values.hpa.enabled }}
+# Phase 04 M5 — HPA for risk-check-service.
+# Symmetric with payment-service: min 2 / max 6 / 70% CPU.
+# Lockstep scaling (per Goal): payment can't usefully outscale risk-check
+# without saturating the synchronous /pay → /check call.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "risk-check-service.fullname" . }}
+  labels:
+    app: risk-check-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "risk-check-service.fullname" . }}
+  minReplicas: {{ .Values.hpa.minReplicas }}
+  maxReplicas: {{ .Values.hpa.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.hpa.targetCPUUtilizationPercentage }}
+{{- end }}

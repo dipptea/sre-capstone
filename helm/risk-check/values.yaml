@@ -3,7 +3,7 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
-replicas: 1
+replicas: 2  # Phase 04 M5 — bumped from 1 to match HPA minReplicas (avoids scale-down on first reconcile)
 
 service:
   port: 80
@@ -25,3 +25,37 @@ resources:
   limits:
     cpu: 500m
     memory: 512Mi
+
+# Phase 04 M5 — three probes per Decision 5 in specs/phase-04.md.
+# /health is a pure in-process check (audited 2026-05-09); liveness can be
+# loose without amplifying upstream-cascade incidents.
+probes:
+  startup:
+    path: /health
+    periodSeconds: 5
+    failureThreshold: 6      # 30s budget for boot
+    timeoutSeconds: 1
+  readiness:
+    path: /health
+    periodSeconds: 5         # fast removal from Service endpoints under failure
+    failureThreshold: 3      # 15s before pod is removed from rotation
+    timeoutSeconds: 2
+  liveness:
+    path: /health
+    periodSeconds: 10
+    failureThreshold: 6      # 60s before kill — looser than readiness on purpose
+    timeoutSeconds: 2
+
+# Phase 04 M5 — HPA per Decision 3 (min 2 / max 6) and Decision 2 (target 70% CPU).
+# Symmetric with payment-service per the lockstep-scaling argument from Goal.
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+# Phase 04 M5 — PodDisruptionBudget per Decision 4.
+# minAvailable: 1 (integer) — voluntary-disruption only.
+pdb:
+  enabled: true
+  minAvailable: 1

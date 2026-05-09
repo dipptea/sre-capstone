@@ -1,0 +1,17 @@
+{{- if .Values.pdb.enabled }}
+# Phase 04 M5 — PodDisruptionBudget for risk-check-service.
+# Mirrors payment-service: minAvailable: 1 (integer) — voluntary-disruption only.
+# Selector matches `app: risk-check-service` (verified via deployment.yaml line 16).
+# policy/v1 (GA in k8s 1.21+).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "risk-check-service.fullname" . }}
+  labels:
+    app: risk-check-service
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: risk-check-service
+{{- end }}
