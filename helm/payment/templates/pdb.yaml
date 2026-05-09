@@ -1,0 +1,18 @@
+{{- if .Values.pdb.enabled }}
+# Phase 04 M4 — PodDisruptionBudget for payment-service.
+# Decision 4: minAvailable: 1 (integer) — voluntary-disruption only.
+# Selector matches `app: payment-service`, which is what the Deployment's pod
+# template applies (verified 2026-05-08 via kubectl get pods --show-labels).
+# policy/v1 (GA in k8s 1.21+) — never use the deprecated policy/v1beta1.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "payment.fullname" . }}
+  labels:
+    app: payment-service
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: payment-service
+{{- end }}

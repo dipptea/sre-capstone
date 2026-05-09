@@ -54,6 +54,14 @@ hpa:
   maxReplicas: 6
   targetCPUUtilizationPercentage: 70
 
+# Phase 04 M4 — PodDisruptionBudget per Decision 4.
+# minAvailable: 1 (integer) — keep at least 1 pod up during voluntary disruption
+# (drain, eviction, cluster upgrade). Involuntary disruption (node hardware
+# failure) ignores PDB by design — that's the lesson, not a bug.
+pdb:
+  enabled: true
+  minAvailable: 1
+
 # Ingress (Phase 02). Disabled by default — opt in with --set ingress.enabled=true.
 # When enabled, the AWS Load Balancer Controller provisions an internet-facing
 # ALB and binds the ACM cert via the certificateArn below.
