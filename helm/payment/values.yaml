@@ -62,13 +62,15 @@ pdb:
   enabled: true
   minAvailable: 1
 
-# Ingress (Phase 02). Disabled by default — opt in with --set ingress.enabled=true.
-# When enabled, the AWS Load Balancer Controller provisions an internet-facing
-# ALB and binds the ACM cert via the certificateArn below.
+# Ingress (Phase 02). Enabled as chart default in Phase 04 M4b prep — see
+# Decision log 2026-05-09. Previously enabled via `--set ingress.enabled=true`
+# at install time and preserved across CI deploys via `--reuse-values`. When
+# we removed `--reuse-values` in M2 to allow new values keys to load, the
+# ingress quietly got disabled (chart default kicked back in) and the ALB was
+# torn down. Hardcoding `enabled: true` and the cert ARN here makes the chart
+# self-contained for this single-environment capstone.
 ingress:
-  enabled: false
+  enabled: true
   host: payment.payservice.click
-  # Pass at upgrade time, not committed to repo:
-  #   --set ingress.certificateArn="$(cd ../infra && terraform output -raw acm_certificate_arn)"
-  certificateArn: ""
+  certificateArn: "arn:aws:acm:us-east-1:591316258137:certificate/a17fa89c-5e52-41df-ae72-c5d700b7c3dc"
 
