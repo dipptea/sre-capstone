@@ -2,9 +2,9 @@
 
 ## STATUS
 
-- **Current phase:** 04 — HA / scaling (HPA, PDB, probes, load test) (pending — run `/spec-new 04` to start)
+- **Current phase:** 04 — HA and scaling (approved 2026-05-08, M1 next)
 - **Last completed phase:** 03b — Second downstream service + cross-service tracing (closed 2026-05-07)
-- **Last updated:** 2026-05-07
+- **Last updated:** 2026-05-08
 
 _This section is updated by `/spec-new` and `/phase-close`. Manual edits are fine._
 
