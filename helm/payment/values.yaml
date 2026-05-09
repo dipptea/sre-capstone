@@ -26,6 +26,26 @@ resources:
     cpu: 500m
     memory: 512Mi
 
+# Phase 04 M2 — three probes per Decision 5 in specs/phase-04.md.
+# /health is a pure in-process check (audited 2026-05-08); liveness can be
+# loose without amplifying downstream-slowness incidents.
+probes:
+  startup:
+    path: /health
+    periodSeconds: 5
+    failureThreshold: 6      # 30s budget for boot (covers Python <5s with margin)
+    timeoutSeconds: 1
+  readiness:
+    path: /health
+    periodSeconds: 5         # fast removal from Service endpoints under failure
+    failureThreshold: 3      # 15s before pod is removed from rotation
+    timeoutSeconds: 2
+  liveness:
+    path: /health
+    periodSeconds: 10
+    failureThreshold: 6      # 60s before kill — looser than readiness on purpose
+    timeoutSeconds: 2
+
 # Ingress (Phase 02). Disabled by default — opt in with --set ingress.enabled=true.
 # When enabled, the AWS Load Balancer Controller provisions an internet-facing
 # ALB and binds the ACM cert via the certificateArn below.
