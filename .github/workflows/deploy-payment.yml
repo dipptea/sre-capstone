@@ -137,7 +137,6 @@ jobs:
           helm upgrade --install "$HELM_RELEASE_NAME" ./helm/payment \
             --namespace "$HELM_NAMESPACE" \
             --create-namespace \
-            --reuse-values \
             --set image.repository="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY" \
             --set image.tag="${{ needs.build-and-push.outputs.image_tag }}" \
             --atomic --timeout 5m
