@@ -1,0 +1,26 @@
+{{- if .Values.hpa.enabled }}
+# Phase 04 M3 — HPA for payment-service.
+# Decision 2: target 70% CPU (industry-common middle; ~30% headroom per pod).
+# Decision 3: min 2 / max 6 (HA floor + node-capacity ceiling for 2× t3.medium).
+# autoscaling/v2 API — modern; supports non-CPU metrics in later phases (Phase 07+).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "payment.fullname" . }}
+  labels:
+    app: payment-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "payment.fullname" . }}
+  minReplicas: {{ .Values.hpa.minReplicas }}
+  maxReplicas: {{ .Values.hpa.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: {{ .Values.hpa.targetCPUUtilizationPercentage }}
+{{- end }}

@@ -3,7 +3,7 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
-replicas: 1
+replicas: 2  # Phase 04 M3 — bumped from 1 to match HPA minReplicas (avoids scale-down on first reconcile)
 
 service:
   port: 80
@@ -45,6 +45,14 @@ probes:
     periodSeconds: 10
     failureThreshold: 6      # 60s before kill — looser than readiness on purpose
     timeoutSeconds: 2
+
+# Phase 04 M3 — HPA per Decision 3 (min 2 / max 6) and Decision 2 (target 70% CPU).
+# Gated by hpa.enabled so envs that don't want autoscaling can disable it.
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
 
 # Ingress (Phase 02). Disabled by default — opt in with --set ingress.enabled=true.
 # When enabled, the AWS Load Balancer Controller provisions an internet-facing
