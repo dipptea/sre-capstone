@@ -59,3 +59,11 @@ hpa:
 pdb:
   enabled: true
   minAvailable: 1
+
+# Phase 05 M1 — Graceful shutdown (mirrors payment-service per spec Decision 1+2).
+# preStop sleep keeps the pod alive long enough for any caller (payment-service,
+# in this case — risk-check is internal-only, no ALB) to notice the pod is gone
+# before SIGTERM hits. terminationGracePeriodSeconds MUST be >= preStopSleep + 5s.
+gracefulShutdown:
+  preStopSleep: 10
+  terminationGracePeriodSeconds: 30

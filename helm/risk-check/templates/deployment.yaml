@@ -19,10 +19,20 @@ spec:
         prometheus.io/scrape: "false"
     spec:
       serviceAccountName: {{ include "risk-check-service.fullname" . }}
+      # Phase 05 M1 — grace period >= preStopSleep + margin (mirrors payment).
+      terminationGracePeriodSeconds: {{ .Values.gracefulShutdown.terminationGracePeriodSeconds }}
       containers:
       - name: risk-check
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        # Phase 05 M1 — preStop hook mirrors payment for consistency.
+        # risk-check is internal-only (no ALB), but the same pattern applies
+        # to any caller that needs time to notice the pod is gone before
+        # connections start being refused.
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep {{ .Values.gracefulShutdown.preStopSleep }}"]
         ports:
         - name: http
           containerPort: {{ .Values.service.targetPort }}

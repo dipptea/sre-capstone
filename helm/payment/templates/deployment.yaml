@@ -19,10 +19,23 @@ spec:
         prometheus.io/scrape: "false"
     spec:
       serviceAccountName: {{ include "payment.fullname" . }}
+      # Phase 05 M1 — grace period must be >= preStopSleep + ~5s margin.
+      # Default k8s value is 30s; named explicitly so future changes don't
+      # silently shorten it and cut off the preStop hook.
+      terminationGracePeriodSeconds: {{ .Values.gracefulShutdown.terminationGracePeriodSeconds }}
       containers:
       - name: payment
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        # Phase 05 M1 — preStop hook closes the graceful-shutdown gap.
+        # sleep N keeps the pod alive after Service-endpoint removal so the
+        # ALB has time to de-register the pod from its target group BEFORE
+        # SIGTERM hits. Without this, kubelet sends SIGTERM immediately and
+        # the ALB still routes to a dying pod for ~3-5s → 502s.
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep {{ .Values.gracefulShutdown.preStopSleep }}"]
         ports:
         - name: http
           containerPort: {{ .Values.service.targetPort }}

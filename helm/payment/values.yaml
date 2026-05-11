@@ -62,6 +62,16 @@ pdb:
   enabled: true
   minAvailable: 1
 
+# Phase 05 M1 — Graceful shutdown (close the Phase 04 M4b 502 gap).
+# preStop sleep keeps the pod alive long enough for the ALB to de-register it
+# from the target group BEFORE SIGTERM hits. Without this, kubelet sends
+# SIGTERM immediately and the ALB still routes to a dying pod for ~3-5s → 502s.
+# IMPORTANT: terminationGracePeriodSeconds MUST be >= preStopSleep + 5s margin,
+# otherwise kubelet SIGKILLs the pod mid-sleep — worse than no preStop at all.
+gracefulShutdown:
+  preStopSleep: 10                        # 10s covers observed ALB de-reg with 2x margin
+  terminationGracePeriodSeconds: 30       # 10s preStop + ~20s for app to drain in-flight requests
+
 # Ingress (Phase 02). Enabled as chart default in Phase 04 M4b prep — see
 # Decision log 2026-05-09. Previously enabled via `--set ingress.enabled=true`
 # at install time and preserved across CI deploys via `--reuse-values`. When
