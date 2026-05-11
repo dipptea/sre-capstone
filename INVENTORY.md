@@ -6,7 +6,7 @@ This file exists because spec-driven work doesn't, by itself, prevent budget sur
 
 ## Cumulative monthly cost (estimate)
 
-**~$160.50/mo** — Phase 03b complete (second service + cross-service tracing). Phase 03 baseline ~$160.50/mo unchanged. **Phase 03b added $0/mo** — `risk-check-service` runs on existing t3.medium nodes (no new EC2), runs in its own `risk-check` namespace (free), uses a separate ECR repo (storage adds <$0.10/mo at this scale; ECR was already slightly over free-tier from Phase 03's image churn). New Helm chart, new CI/CD workflow, IAM policy extension on existing role — all free. **ALB still scheduled for teardown after 2-week test horizon.** Domain `payservice.click` $3 one-time, auto-renew DISABLED.
+**~$160.50/mo** — Phase 04 complete (HA primitives on both services). Phase 03b baseline ~$160.50/mo unchanged. **Phase 04 added $0/mo** — `metrics-server` runs as a single small pod on existing nodes (negligible CPU/memory); HPA, PDB, and probes are free Kubernetes resources; replicas 1→2 bump fits within existing node capacity (no new EC2); ALB was recreated mid-phase but is the same hourly cost as the prior one. **ALB still scheduled for teardown after 2-week test horizon.** Domain `payservice.click` $3 one-time, auto-renew DISABLED.
 
 Budget targets (from `README.md`):
 - Soft alert: **$200/mo**
@@ -386,6 +386,8 @@ Before running `terraform apply` at the start of a phase, ask:
 If the answer to #2 is "no" and #3 is "not sure," **stop and ask the user before applying.** Hitting the soft alert silently is a framework failure, not the user's responsibility.
 
 ## Last updated
+
+2026-05-10 — Phase 04 closed. Added: `metrics-server` Helm release (chart 3.12.2 / app 0.7.2) in `kube-system` namespace, installed via Terraform `helm_release` resource in [infra/metrics-server.tf](infra/metrics-server.tf) — **new Helm-install pattern** (declarative, drift-detected; Datadog and AWS LBC remain on the older `null_resource + local-exec` pattern). Added per-service `HorizontalPodAutoscaler` (`autoscaling/v2`, min 2 / max 6 / 70% CPU target) and `PodDisruptionBudget` (`policy/v1`, `minAvailable: 1`) on both `payment` and `risk-check` Helm charts. Added three-probe stack (startup + readiness + liveness on `/health`) parameterized in `values.yaml`. Bumped replicas from 1 to 2 on both services. Restored `ingress.enabled: true` + `certificateArn` as chart defaults in `helm/payment/values.yaml` (were previously held implicitly by `--reuse-values` in the workflow). Removed `--reuse-values` from `deploy-payment.yml`. Re-applied Terraform to refresh `aws_route53_record.payment` alias after Ingress recreation gave the ALB a new DNS name. **Cumulative cost unchanged at ~$160.50/mo** — all Phase 04 additions are free Kubernetes resources; `metrics-server` runs as a single small pod on existing nodes (negligible CPU/memory). No new AWS resources, no new EC2, no new ALB beyond the one that was recreated (same hourly cost). ALB still scheduled for teardown after the 2-week test horizon.
 
 2026-05-07 — Phase 03b closed. Added: `risk-check-service` ECR repo, `risk-check-service` Helm release in `risk-check` namespace, `deploy-risk-check.yml` workflow. Renamed `deploy.yml` → `deploy-payment.yml` and added path filters to both workflows. Extended `gh-actions-deployer` inline policy to cover both ECR repos. Cumulative cost unchanged at ~$160.50/mo (new service runs on existing nodes; ECR storage adds <$0.10/mo).
 

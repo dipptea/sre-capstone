@@ -456,6 +456,810 @@ search: service:payment-service env:capstone
         service:payment-service env:capstone resource_name:"POST /pay"
 ```
 
+## Deploy Phase 04 — HA and scaling (HPA, PDB, probes, drain test)
+
+### Milestone 1 — metrics-server.tf
+
+Install metrics-server: metrics-server is being installed into the EKS cluster.
+
+Purpose of metrics-server: We are installing metrics-server into the EKS cluster so Kubernetes can collect CPU and memory metrics required for HPA autoscaling.
+
+Terraform uses `helm_release` to manage the Helm installation declaratively.
+
+- `repository` → tells Terraform where to download the metrics-server Helm chart from.
+- `chart` → tells Terraform which Helm chart to install.
+- `namespace` → tells Terraform where inside Kubernetes to install metrics-server (`kube-system`).
+- `version` → tells Terraform which exact chart version to install for stable/reproducible deployments.
+- `depends_on` → tells Terraform to wait until the EKS cluster and access permissions are fully ready before installing metrics-server.
+- `output` → prints verification commands after `terraform apply` so we can confirm metrics-server works successfully.
+
+Run command to check if chart exists:
+
+```bash
+cd infra
+helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ 2>/dev/null || true
+helm repo update metrics-server
+helm search repo metrics-server/metrics-server --versions | head -10
+```
+
+What does the chart contain that's separate from the app itself? (Why would maintainers ship two chart versions for the same app?)
+
+```
+Chart 3.9.0  → App 0.6.3
+Chart 3.10.0 → App 0.6.3
+- same app version
+- different chart version
+
+Chart 3.12.2 → App 0.7.2
+Chart 3.13.0 → App 0.8.0
+BOTH changed:
+- Helm chart version changed
+- metrics-server software version changed
+```
+
+Chart changed only → deployment/probe/RBAC/template fixes. App changed → actual metrics-server software upgraded. CHART VERSION can change independently. APP VERSION can also change independently. Sometimes both change together. Sometimes only chart changes.
+
+If metrics-server needs a NEW SOFTWARE FEATURE, which version changes? If a new metrics-server feature is needed, the APP VERSION must change. The CHART VERSION may also change to package that newer app. Terraform installs the Helm chart, not the application directly (because the Helm chart CONTAINS the application version reference inside it).
+
+```
+Terraform        = the tool managing the installation process.
+Helm chart       = the deployment/install package/template for the application.
+CHART VERSION    = version of the Helm deployment package/template.
+Application      = the actual software running inside Kubernetes.
+APP VERSION      = version of the actual application/software/container.
+
+Flow:
+Terraform → installs Helm chart version 3.12.2
+Helm chart 3.12.2 → internally deploys metrics-server app version 0.7.2
+
+Terraform directly controls: CHART VERSION
+Helm chart internally controls: APP VERSION
+```
+
+What dangerous/unexpected infrastructure changes would you NOT want `terraform plan` to show? EKS cluster, VPC, CI/CD IAM/OIDC role, Datadog, AWS Load Balancer Controller, ALB, Route 53 records, ACM certificate, ECR repositories, node group, NAT Gateway, subnets / route tables, payment-service or risk-check-service infrastructure. **Infrastructure that we created.**
+
+```
+terraform plan
+```
+
+Only `helm_release.metrics_server` appears. Version 3.12.2 ✓, namespace `kube-system` ✓.
+
+When Terraform runs `helm_release` apply, how does Terraform decide "metrics-server installation succeeded" / What exact condition does Terraform watch during `wait=true`?
+
+- (a) Only checks whether Helm command exited successfully.
+- **(b) Checks whether pods/resources created by the Helm chart become healthy/Ready. (Answer)**
+- (c) Checks whether `kubectl top nodes` returns metrics data.
+- (d) Checks only whether deployment replica count numbers match.
+
+```
+terraform apply
+```
+
+Terraform successfully installed the metrics-server Helm chart into the EKS cluster. (Only the new metrics-server resource was added. Nothing existing was modified or deleted.) metrics-server is now running in the cluster and Kubernetes should now be able to provide CPU/memory metrics for HPA.
+
+```
+kubectl get deploy -n kube-system metrics-server
+```
+
+Asked Kubernetes to show the Deployment status for metrics-server inside the `kube-system` namespace.
+
+```
+kubectl top nodes
+```
+
+Asked metrics-server / Kubernetes Metrics API to show live CPU and memory usage for all worker nodes in the cluster.
+
+```
+kubectl top pods -A
+```
+
+Asked metrics-server / Kubernetes Metrics API to show live CPU and memory usage for ALL pods in ALL namespaces.
+
+Why did `kubectl top nodes` suddenly start working after M1, when before it showed: "Metrics API not available"?
+
+Before M1, the cluster did not have metrics-server installed, so Kubernetes had no Metrics API provider. Because of that, `kubectl top nodes` could not get CPU or memory data and showed "Metrics API not available." After M1, we installed metrics-server into EKS. metrics-server collects CPU and memory usage from the kubelet running on each EKS worker node, then exposes that data through the Kubernetes Metrics API. Now `kubectl top nodes` can read from that Metrics API, so it shows live CPU and memory usage for the worker nodes. HPA will use the same metrics later to decide when to scale pods.
+
+### Milestone 2 — tune probes on payment-service
+
+1. Startup probe → checks whether the app finished starting.
+2. Readiness probe → checks whether the app is ready to receive traffic.
+3. Liveness probe → checks whether the running app is still healthy/alive.
+
+`values.yaml`: We are adding Kubernetes health probe configuration to payment-service Helm `values.yaml`.
+
+- startup probe → checks whether the application finished booting successfully.
+- `path: /health` → Kubernetes will call the `/health` endpoint for checks.
+- `periodSeconds: 5` → check every 5 seconds.
+- `failureThreshold: 6` → allow 6 failed checks before considering startup failed.
+- 30s startup budget → 6 failures × 5 seconds = about 30 seconds allowed for app startup.
+
+`deployment.yaml`: We are adding Kubernetes health checks (probes) to the payment-service Deployment.
+
+- `readinessProbe` → checks whether the application is ready to receive traffic.
+- `path: /health` → Kubernetes calls the `/health` endpoint to test readiness.
+- `port: http` → health check runs on the container's http port.
+- `initialDelaySeconds: 5` → wait 5 seconds after container starts before first readiness check.
+- `periodSeconds: 10` → check readiness every 10 seconds.
+- `timeoutSeconds: 2` → health check must respond within 2 seconds.
+- `failureThreshold: 3` → after 3 failed checks, Kubernetes removes the pod from traffic/endpoints.
+- Goal → only send traffic to healthy and ready pods.
+
+- `livenessProbe` → checks whether the running application is still alive or stuck.
+- `path: /health` → Kubernetes calls the same `/health` endpoint for liveness checks.
+- `initialDelaySeconds: 10` → wait 10 seconds before starting liveness checks.
+- `periodSeconds: 10` → check liveness every 10 seconds.
+- `failureThreshold: 3` → after 3 failed checks, Kubernetes restarts the pod.
+- Goal → automatically restart unhealthy or stuck containers.
+
+`/health`: check payment-service `/health` endpoint is safe for Kubernetes probes.
+
+```python
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+```
+
+Is the payment-service process alive and able to respond? We checking the liveliness of payment-service here not the app.
+
+```
+git diff helm/payment/ | cat
+```
+
+This command showed all local code changes made inside the payment-service Helm chart before commit/push. (So it's showing whatever code changes happened in which file and what that code do.)
+
+```
+git add helm/payment/values.yaml helm/payment/templates/deployment.yaml
+```
+
+This command staged the modified Helm chart files for commit. Git now marks these probe-related changes as ready to be committed into repository history.
+
+```
+git commit -m "Phase 04 M2: parameterize probes on payment-service ..."
+```
+
+This command created a new Git commit containing the M2 probe changes. Git recorded 38 new lines added, 11 old lines removed across the two modified Helm chart files.
+
+What we learned: "Your branch is ahead of 'origin/main' by 1 commit." Local Git has one extra commit that remote GitHub does not have yet. We can push to GitHub next. Local commit currently says M2 happened first, but M1/spec files are still not committed. Reorder locally before pushing so GitHub history reads:
+1. Phase 04 spec + M1 metrics-server
+2. Phase 04 M2 probes
+
+(No damage yet because it is only local. That is why we can still fix the order before pushing to GitHub.)
+
+How to resolve it:
+
+```
+git reset --soft HEAD~1
+```
+
+Removed the last local Git commit from history while keeping all M2 probe changes safely in the working directory/staging area. Purpose: rebuild commit history in cleaner order: M1/spec first → M2 second.
+
+```
+git status
+```
+
+Showed current Git state: staged files, unstaged files, untracked files, branch status compared to GitHub.
+
+```
+git restore --staged helm/payment/
+```
+
+Removed the Helm payment probe files from the staging area without deleting any actual file changes. Purpose: temporarily separate M2 changes so M1/spec could be committed first.
+
+```
+git add infra/metrics-server.tf specs/phase-04.md ROADMAP.md
+```
+
+Staged the M1/spec-related files for commit. Files included: metrics-server Terraform file, full Phase 04 spec, roadmap status update.
+
+```
+git commit -m "Phase 04 spec approved + M1: install metrics-server via helm_release"
+```
+
+Created the M1/spec commit locally. This permanently saved metrics-server Helm/Terraform installation, approved Phase 04 spec, roadmap update. Commit ID: `3ebefb2`.
+
+```
+git log --oneline -5
+```
+
+Displayed the latest 5 Git commits in short format. Purpose: verify commit order/history.
+
+```
+git add helm/payment/
+```
+
+Staged the payment-service probe changes again for M2.
+
+```
+git commit -m "Phase 04 M2: parameterize probes on payment-service ..."
+```
+
+Created the M2 probe commit locally. This saved startup probe, readiness tuning, liveness tuning, configurable Helm probe settings, `/health` audit documentation. Commit ID: `0f78a6a`.
+
+```
+git push origin main
+```
+
+Pushed both local commits to GitHub remote repository (`origin/main`). GitHub now contains: (1) Phase 04 spec + M1 metrics-server, (2) Phase 04 M2 probe changes.
+
+```
+gh run list --limit 3
+```
+
+Listed the latest 3 GitHub Actions workflow runs. Result showed: Deploy payment-service workflow triggered automatically from the new push.
+
+```
+gh run watch
+```
+
+Started watching the active GitHub Actions workflow live in the terminal. Purpose: monitor CI/CD deployment progress/status in real time. If succeeded: push from your LOCAL Git repository to the REMOTE GitHub repository.
+
+**What I have learned: deployment failed for payment-service.**
+
+```
+gh run watch 25585771438
+```
+
+`Run Deploy payment-service (25585771438) has already completed with 'failure'`
+
+```
+gh run view 25585771438 --log-failed | tail -100
+```
+
+Check the log where failure happened. The Helm deployment failed because the workflow used `--reuse-values`.
+
+What happened: The new deployment template expected new probe values like `.Values.probes.startup.path`. Problem: Helm reused OLD deployed values that did not contain the new probes section. Result: Helm could not find `probes.startup` and failed with `nil pointer evaluating interface {}.startup`.
+
+Impact: The CI/CD deployment failed before Kubernetes deployment started. Protection: `--atomic` automatically rolled back the failed deployment, so old working pods continued running safely.
+
+Fix: removed `--reuse-values` from the Helm deploy workflow.
+
+Why fix worked: Now Helm always uses the latest deployment templates and `values.yaml` from GitHub during deployment.
+
+Main learning: **Reusing old Helm values can break deployments when new templates require new configuration keys.**
+
+```
+kubectl describe pod -n payment -l app=payment-service | grep -A 2 'Liveness\|Readiness\|Startup'
+```
+
+Find pod(s): show full detailed Kubernetes pod information from namespace `payment` with label `app=payment-service`. Take the describe output and filter/search only lines containing `Liveness`, `Readiness`, `Startup`. `-A 2` = show 2 lines after match.
+
+### Milestone 3 — HPA + replica bump on payment
+
+`values.yaml`:
+
+1. Deployment pods replicas = starting/base number of pods Kubernetes should run.
+
+```yaml
+replicas: 2
+```
+
+payment-service will now start with 2 pods instead of 1 (if one pod fails, the second pod can still serve traffic). Deployment replicas were increased to 2 to match the future HPA (Horizontal Pod Autoscaler) minimum replica count.
+
+2. Added HPA configuration = automatic scaling controller for those same payment-service pods.
+
+```yaml
+minReplicas: 2
+maxReplicas: 6
+```
+
+HPA will: never go below 2 pods, can automatically scale up to 6 pods during load.
+
+`hpa.yaml`: This file creates a Kubernetes Horizontal Pod Autoscaler (HPA) for payment-service.
+
+- if `hpa.enabled=true` in `values.yaml`, create the HPA resource
+- uses `autoscaling/v2` modern Kubernetes HPA API
+- creates a Kubernetes HPA resource using Helm templating for dynamic naming
+- `scaleTargetRef` connects the HPA to the payment-service Deployment
+- `minReplicas: 2` means never scale below 2 pods
+- `maxReplicas: 6` means can scale up to maximum 6 pods
+- `metrics` section defines what metric HPA monitors for scaling decisions
+- `resource: cpu` means HPA uses CPU utilization for autoscaling
+- `averageUtilization: 70` means HPA tries to keep average pod CPU around 70%
+- if CPU usage goes above 70%, HPA adds more pods
+- if CPU usage drops below 70%, HPA removes extra pods (but never below 2)
+
+```
+git diff helm/payment/ | cat
+```
+
+Was used to view all current code/configuration changes made inside the payment-service Helm chart before commit/push: what files changed, what exact lines changed, what was added/removed/modified.
+
+```
+git status
+```
+
+Local Git and GitHub main branch currently match. No unpushed commits exist right now.
+
+```
+git add helm/payment/values.yaml helm/payment/templates/hpa.yaml
+```
+
+Prepare these files for the next local staging commit.
+
+```
+git commit -m "Phase 04 M3: add HPA for payment-service (min 2 / max 6 / 70% CPU); bump replicas 1->2"
+```
+
+Commit was successfully created on the local main branch. `6e3c73b` = commit ID/hash for this M3 change. 2 files changed - `values.yaml`, `hpa.yaml`.
+
+```
+git push origin main
+```
+
+Uploads LOCAL Git commits to GitHub `origin/main` branch.
+
+```
+gh run list --limit 2
+```
+
+Confirms: GitHub Actions deployment pipeline ran, deployment job completed successfully.
+
+```
+kubectl get hpa -n payment
+```
+
+→ Verify that the HPA autoscaler resource exists and is actively managing payment-service scaling. Retrieve and display all HPA autoscaling resources running in the payment namespace. What it retrieves: HPA name, target Deployment, current CPU usage, target CPU threshold, minimum pod count, maximum pod count, current running replica count, resource age.
+
+```
+kubectl describe hpa payment -n payment | grep -A 4 'Conditions\|Metrics'
+```
+
+→ Verify detailed HPA health, CPU metrics, and scaling conditions/status for payment-service. It retrieves details like: current CPU metrics, target CPU threshold, current replica count, min/max replica settings, scaling events, scaling conditions/status, target Deployment information, whether HPA is healthy and actively scaling. And pass it to where label matches `Conditions\|Metrics` and show 4 rows after match.
+
+```
+kubectl get pods -n payment
+```
+
+→ Verify that the expected payment-service pods are running healthy after M3 scaling changes. Retrieved/listed all running pods inside the payment namespace.
+
+### Milestone 4 — Deploy the PDB manifest via CI/CD
+
+`values.yaml`:
+
+- Adds PodDisruptionBudget (PDB) configuration into `values.yaml`.
+- `pdb.enabled: true` means enable/create the PDB resource.
+- `minAvailable: 1` means Kubernetes must keep at least 1 payment-service pod available during voluntary disruptions.
+- This value is later used by `pdb.yaml` through Helm templating.
+- Helps prevent full application downtime during node drains or maintenance operations.
+
+`pdb.yaml` (PDB = PodDisruptionBudget):
+
+- This file creates a Kubernetes PodDisruptionBudget (PDB) for payment-service.
+- PDB is created only if `pdb.enabled=true` in `values.yaml`.
+- Uses modern Kubernetes API version `policy/v1`.
+- Creates a Kubernetes resource of type `PodDisruptionBudget`.
+- Uses Helm templating to dynamically generate the PDB resource name.
+- `minAvailable: 1` means at least 1 payment-service pod must always remain available during voluntary disruptions.
+- `selector.matchLabels` tells Kubernetes which pods this PDB should protect.
+- `app: payment-service` selector matches the labels used by payment-service pods.
+- The selector label was verified earlier using `kubectl get pods --show-labels`.
+- PDB protects against voluntary disruptions like node drains, upgrades, or cluster maintenance.
+- PDB does not protect against application crashes or node failures.
+- Overall this file helps maintain payment-service availability during Kubernetes maintenance operations.
+
+**What I learned: Kubernetes label matching.** Kubernetes selects pods using labels like `app: payment-service`. Then another resource (HPA/PDB/Service etc.) uses `app: payment-service`.
+
+Warning: If selector labels do NOT exactly match pod labels, Kubernetes may select zero pods or wrong pods.
+
+Example: pods have `app=payment` but selector searches `app=payment-service`.
+
+How to find:
+
+```
+kubectl get pods -n payment --show-labels
+```
+
+Display pod labels in the output.
+
+```
+git diff helm/payment/values.yaml | cat
+```
+
+Shows the current local changes made only in `helm/payment/values.yaml` before committing or pushing them.
+
+```
+git status
+```
+
+Shows the current local Git state — changed files, staged files, untracked files, and commit/push status.
+
+```
+git add helm/payment/values.yaml helm/payment/templates/pdb.yaml
+```
+
+Prepares/stages the `values.yaml` and `pdb.yaml` changes for the next local Git commit.
+
+```
+git commit -m "Phase 04 M4: add PDB for payment-service (minAvailable: 1)"
+```
+
+Created a new local Git commit saving the M4 PDB (PodDisruptionBudget) changes for payment-service.
+
+```
+git push origin main
+```
+
+Pushed your local M4 PDB commit from your laptop/local Git repository to the GitHub main branch and triggered the CI/CD deployment.
+
+```
+gh run list --limit 2
+```
+
+Shows the latest GitHub Actions CI/CD workflow runs and their current deployment status.
+
+```
+gh run watch 25592134249
+```
+
+Watched the latest GitHub Actions CI/CD deployment run (workflow ID 25592134249) and confirmed the newest pushed M4 commit deployed successfully.
+
+Verify PDB:
+
+```
+kubectl get pdb -n payment
+```
+
+Verified that the payment-service PodDisruptionBudget (PDB) was successfully created and is protecting at least 1 pod during Kubernetes maintenance disruptions.
+
+```
+kubectl get pdb payment -n payment -o yaml | grep -A 5 'spec\|status'
+```
+
+Verified the detailed PDB configuration and confirmed Kubernetes currently allows only 1 payment-service pod disruption while keeping at least 1 healthy pod running.
+
+```
+kubectl get pods -n payment -o wide
+```
+
+Showed detailed payment-service pod information including which Kubernetes worker node each pod is running on, confirming the 2 pods are distributed across 2 different EKS nodes for High Availability.
+
+```
+kubectl get ingress -n payment
+# No resources found in payment namespace.
+```
+
+**What I learned (the ALB regression):**
+
+- Phase 02 originally deployed payment-service with `ingress.enabled=true` and `certificateArn` (it enables secure encrypted HTTPS traffic between user browser and ALB) set through Helm CLI flags.
+- This created the Kubernetes Ingress resource and AWS ALB public HTTPS endpoint.
+- Later CI/CD deployments used `--reuse-values`.
+- `--reuse-values` preserved the old `ingress.enabled=true` setting during future deployments.
+- In M2 we removed `--reuse-values` to fix the probes deployment issue.
+- After removing it, Helm started using the default `values.yaml` again.
+- In `values.yaml`, `ingress.enabled=false` by default.
+- Helm compared the new desired state with the old deployed state.
+- Helm saw that Ingress was no longer enabled/described in the desired configuration.
+- Helm automatically deleted the Kubernetes Ingress resource.
+- AWS Load Balancer Controller then removed the ALB because the Ingress disappeared.
+- CI/CD still succeeded because deleting an Ingress resource is not considered a deployment failure.
+- Result: application deployment worked, but the public HTTPS endpoint disappeared silently.
+- Main learning: `--reuse-values` was unintentionally preserving old ingress settings across deployments.
+- Correct long-term fix: explicitly define ingress configuration in Git/`values.yaml` or deployment workflow instead of relying on reused old Helm values.
+
+How to fix it:
+
+- This change turns the payment-service Ingress back ON.
+- `ingress.enabled: true` tells Kubernetes to create the public ALB again.
+- `host` sets the public website/domain name.
+- `certificateArn` tells AWS which HTTPS certificate to attach to the ALB.
+- Earlier the ALB worked because `--reuse-values` kept old ingress settings alive.
+- When `--reuse-values` was removed in M2, Helm used default values again.
+- Default `ingress.enabled=false` caused Kubernetes to delete the Ingress.
+- Deleting Ingress removed the ALB / public HTTPS endpoint.
+- Now `ingress.enabled=true` and `certificateArn` are permanently stored in `values.yaml`.
+- Future deployments will automatically keep the ALB and HTTPS endpoint working.
+
+```
+git add helm/payment/values.yaml
+git commit -m "Phase 04 M4b prep: restore ALB ingress as chart default (lost when --reuse-values was removed in M2 fix)"
+git push origin main
+gh run list --limit 2
+```
+
+Pushed the local ALB/Ingress restoration fix commit and triggered a new CI/CD deployment.
+
+```
+kubectl get ingress -n payment
+```
+
+Verified that the payment-service Kubernetes Ingress and public AWS ALB were successfully recreated, and the application is again reachable through the `payment.payservice.click` domain.
+
+```
+curl -v https://payment.payservice.click/health 2>&1 | head -25
+```
+
+The ALB/Ingress was recreated successfully, but DNS is not resolving yet.
+
+```
+curl -v http://k8s-payment-payment-490cbbb298-1129335665.us-east-1.elb.amazonaws.com/health 2>&1 | head -25
+```
+
+This curl proved the ALB DNS name works and the ALB is reachable. HTTP 301 Moved Permanently means the ALB received your HTTP request and redirected it to HTTPS.
+
+```
+curl -ksv https://k8s-payment-payment-490cbbb298-1129335665.us-east-1.elb.amazonaws.com/health 2>&1 | tail -20
+```
+
+This proved HTTPS is working on the ALB, but the request returned 404 because the ALB Ingress rules are expecting the configured host name (`payment.payservice.click`), not the raw ALB DNS name. So: ALB is healthy, HTTPS certificate is attached, traffic reached the ALB, but host-based routing did not match, so ALB returned 404.
+
+```
+curl -ksv -H "Host: payment.payservice.click" https://k8s-payment-payment-490cbbb298-1129335665.us-east-1.elb.amazonaws.com/health 2>&1 | tail -10
+```
+
+ALB routed the request correctly to payment-service, and payment-service `/health` responded successfully.
+
+**Issue for DNS:**
+
+1. Terraform originally created a Route 53 DNS record for `payment.payservice.click`.
+2. That DNS record pointed to the AWS ALB created by the Kubernetes Ingress.
+3. Terraform automatically found the ALB using AWS Load Balancer Controller tags.
+4. Earlier Ingress deletion caused AWS to delete the old ALB.
+5. Route 53 DNS was still pointing to that deleted old ALB.
+6. In M4b prep, Ingress was recreated and AWS created a brand new ALB with a new DNS name.
+7. Route 53 still points to the old deleted ALB because Terraform has not refreshed the DNS record yet.
+8. Direct curl to the new ALB worked because you manually used the new ALB DNS name with the correct Host header.
+9. `payment.payservice.click` still fails because Route 53 DNS is outdated.
+10. Running `terraform apply` will make Terraform find the new ALB and update Route 53 to point to the new ALB.
+11. After DNS propagation, `payment.payservice.click` will work again normally.
+12. Option A fixes DNS properly now and restores the real production-style HTTPS endpoint.
+13. Option B uses a temporary Host-header workaround but leaves DNS broken.
+14. Best choice is Option A because it fully restores the public application path correctly.
+
+```
+terraform plan
+```
+
+→ preview proposed infrastructure changes. ("Terraform plans to update the Route53 alias record to the new ALB DNS name.")
+
+```
+terraform apply
+```
+
+→ actually perform the DNS update in AWS.
+
+```
+dig +short payment.payservice.click
+```
+
+Confirmed DNS is fixed: `payment.payservice.click` now resolves to the new ALB IP addresses.
+
+```
+curl -sI https://payment.payservice.click/health
+```
+
+Confirmed HTTPS routing works through `payment.payservice.click`, but `curl -I` sends a HEAD request and the `/health` endpoint only allows GET, so the app returned 405 Method Not Allowed.
+
+```
+curl -s https://payment.payservice.click/health
+echo
+```
+
+Confirmed the real public HTTPS endpoint is fully working: DNS, ALB, Ingress routing, and payment-service `/health` all returned successfully.
+
+### Milestone 4a — drain test for PDB
+
+(One payment pod will be evicted from the drained node. A replacement payment pod on the remaining healthy node.)
+
+Terminal 1:
+
+```
+kubectl get pods -n payment -w
+```
+
+Starts a live watch of payment-service pods in the payment namespace so you can observe pod changes, evictions, rescheduling, or restarts in real time during the M4b node drain test.
+
+Terminal 2:
+
+```
+while true; do curl -s -o /dev/null -w "%{http_code}\n" https://payment.payservice.click/health; sleep 1; done
+```
+
+Continuously sends HTTPS health requests to `payment.payservice.click` every second and prints the HTTP status code to verify the application stays available (no 5xx/downtime) during the node drain test.
+
+Terminal 3:
+
+```
+kubectl drain ip-10-0-2-167.ec2.internal --ignore-daemonsets --delete-emptydir-data
+```
+
+Safely drained one Kubernetes worker node by cordoning it (stopping new pod scheduling) and evicting movable pods, while the PDB allowed only one payment-service pod to be disrupted so the application stayed available during maintenance.
+
+Note: One terminal is showing live pod/node changes during the drain, and the other terminal is continuously checking if the application health endpoint is still working without downtime.
+
+```
+kubectl get pods -n payment -o wide
+```
+
+Detailed payment-service pod information including: pod names, health status, pod IPs, which Kubernetes worker node each pod is running on.
+
+```
+kubectl get pdb -n payment
+```
+
+Verify PDB is still protecting application availability during/after the drain. The PodDisruptionBudget (PDB) status for payment-service including: minimum required healthy pods, allowed disruptions, current protection state.
+
+**All the steps:**
+
+- One payment-service pod survived the node drain successfully.
+- Kubernetes automatically created a replacement pod after eviction.
+- Both pods are currently running on the same healthy node because the drained node is still cordoned (unschedulable).
+- PDB worked correctly by allowing only 1 pod disruption while keeping at least 1 healthy pod available.
+- Application stayed mostly available during the drain.
+- Around 5 temporary HTTP 502 errors happened during pod termination.
+- Those 502 errors happened because the ALB was still sending traffic to the terminating pod for a few seconds before fully removing it from routing.
+- This exposed a graceful shutdown gap in the application deployment configuration.
+- PDB protects pod availability but does not solve ALB deregistration timing issues.
+- First immediate task is to uncordon the drained node so Kubernetes can use it again.
+- `kubectl uncordon` removes the `SchedulingDisabled` state from the drained node.
+- Existing pods will remain on the current node until future scaling or deployments happen.
+- `Ctrl+C` stops the live watch and continuous curl monitoring terminals.
+- Option A means accept the small 502 issue for now, document it, and continue to the next milestone.
+- Option B means fixing graceful shutdown now using `preStop` hooks and `terminationGracePeriodSeconds`, then retesting everything.
+- Recommendation is Option A because Phase 04 goals were already achieved (HPA, probes, PDB), and graceful shutdown tuning can be handled later in Phase 05 chaos testing.
+
+(Yes — Option B is mainly about fixing graceful shutdown timing so the ALB stops sending traffic to the terminating/draining pod before the pod fully shuts down.)
+
+### Milestone 5 — mirror probes/HPA/PDB to risk-check-service
+
+M5 added the same Phase 04 setup to risk-check-service:
+
+- `values.yaml` → changed replicas from 1 to 2, added probe settings, added HPA settings, added PDB settings
+- `deployment.yaml` → added startup, readiness, and liveness probes
+- `hpa.yaml` → added autoscaling for risk-check-service, min 2 / max 6 / 70% CPU
+- `pdb.yaml` → added disruption protection, `minAvailable: 1`
+
+`values.yaml`, `deployment.yaml`, `hpa.yaml` & `pdb.yaml`:
+
+- M5 means copy the same Phase 04 HA/scaling setup from payment-service to risk-check-service.
+- Add three probes to risk-check: startup, readiness, and liveness.
+- Add HPA to risk-check: min 2 pods, max 6 pods, target 70% CPU.
+- Add PDB to risk-check: `minAvailable: 1`.
+- No separate node drain test for risk-check because payment already proved the pattern.
+- No graceful-shutdown fix now because that is being saved for later/Phase 05.
+- Before changing risk-check, audit its `/health` endpoint to make sure it only checks risk-check itself and does not call downstream services.
+
+```
+git diff helm/risk-check/ | cat
+```
+
+This git diff shows the M5 changes made to risk-check-service: startup/readiness/liveness probes were added, replicas changed from 1 to 2, and HPA + PDB settings were added so risk-check now gets the same health checks, autoscaling, and disruption protection as payment-service.
+
+```
+git status
+```
+
+Is showing that the M5 risk-check changes are currently only local/uncommitted: 3 existing files were modified and 2 new Kubernetes template files (HPA and PDB) were created, but nothing has been staged or committed to Git yet.
+
+- `values.yaml`: replicas bump + 3 new blocks (probes/hpa/pdb)
+- `deployment.yaml`: probes replaced with templated versions
+- 2 new files: `templates/hpa.yaml`, `templates/pdb.yaml`
+
+```
+git add helm/risk-check/
+```
+
+It means Git has now marked those risk-check files as "ready to be saved" in the next commit. Before `git add`: files were only changed locally on your laptop. After `git add`: Git moved those changes into the staging area, waiting for the next `git commit`.
+
+```
+git commit -m "Phase 04 M5: mirror probes/HPA/PDB to risk-check-service per Decision 5; bump replicas 1->2"
+```
+
+`1->2` (replicas changed from 1 pod to 2 pods.) The replicas were changed inside `values.yaml` / deployment configuration files, but the commit message is simply describing/summarizing that change in human-readable words so people reading Git history understand what this commit did.
+
+```
+git push origin main
+```
+
+Pushed the local M5 risk-check commit from your laptop/local Git repository to the GitHub main branch and triggered the GitHub Actions CI/CD deployment workflow.
+
+```
+gh run list --limit 2
+```
+
+Shows the latest GitHub Actions CI/CD runs, confirming the new M5 risk-check deployment workflow is currently running while the earlier payment-service deployment already succeeded.
+
+```
+gh run watch 25605750229
+```
+
+Watched the latest GitHub Actions CI/CD deployment run for risk-check-service and confirmed the M5 deployment completed successfully.
+
+```
+kubectl get hpa,pdb -n risk-check
+```
+
+Verified that both the HPA autoscaler and PDB protection were successfully created for risk-check-service, and Kubernetes is currently running 2 pods with autoscaling and disruption protection active.
+
+```
+kubectl get pods -n risk-check
+```
+
+Verified that risk-check-service is now successfully running 2 healthy pods after the M5 High Availability and autoscaling deployment changes.
+
+```
+kubectl describe pod -n risk-check -l app=risk-check-service | grep -A 2 'Liveness\|Readiness\|Startup'
+```
+
+This command verified that both risk-check pods now have all 3 probes configured (Startup, Readiness, Liveness) per Decision 5.
+
+## Phase 04 — How and where to find common problems
+
+**metrics-server problems:**
+- How to find: `kubectl top nodes`, `kubectl top pods`, `kubectl get hpa`
+- Where: Kubernetes CLI / EKS cluster
+- Problem: HPA cannot read CPU metrics and scaling stops.
+
+**HPA problems:**
+- How to find: `kubectl get hpa`, `kubectl describe hpa`
+- Where: Kubernetes HPA resources
+- Problem: Pods do not scale correctly or hit max replicas.
+
+**PDB problems:**
+- How to find: `kubectl get pdb`, `kubectl describe pdb`, `kubectl drain`
+- Where: During node drain or maintenance
+- Problem: Node drain gets blocked or all pods get evicted together.
+
+**Startup probe problems:**
+- How to find: `kubectl describe pod`, `kubectl get events`, `kubectl logs`
+- Where: Pod startup / CrashLoopBackOff state
+- Problem: Kubernetes kills app before startup completes.
+
+**Readiness probe problems:**
+- How to find: `kubectl get endpoints`, `kubectl get events`, curl requests / load testing
+- Where: Service traffic routing
+- Problem: Healthy pods temporarily removed from traffic causing intermittent 503s.
+
+**Liveness probe problems:**
+- How to find: `kubectl get pods`, `kubectl describe pod`, `kubectl get events`, restart counts increasing
+- Where: Pod restart loops and outages
+- Problem: Aggressive liveness checks create restart storms and outages.
+
+**Pending pod problems:**
+- How to find: `kubectl get pods`, `kubectl describe pod`, `kubectl describe node`
+- Where: During HPA scaling
+- Problem: Cluster lacks CPU/memory capacity for new pods.
+
+**Load-test related problems:**
+- How to find: `hey`, `kubectl get hpa -w`, `kubectl get pods -w`, Datadog dashboards
+- Where: During scaling/load tests
+- Problem: Scaling delays, CPU saturation, or temporary 5xx during load.
+
+**Datadog observability problems:**
+- How to find: Datadog APM, Datadog logs, Datadog flame graphs
+- Where: Datadog SaaS UI
+- Problem: Missing traces, latency spikes, or unhealthy service behavior.
+
+**Drain-related problems:**
+- How to find: `kubectl drain`, `kubectl get pdb`, `kubectl get endpoints`
+- Where: During node maintenance/drain testing
+- Problem: Pods evict incorrectly or service availability drops during drain.
+
+## Phase 04 — Rollback / undo
+
+**Full Phase 04 rollback:** Return the cluster back to the Phase 03b architecture. Remove HPA, PDB, metrics-server, and revert Helm chart changes through CI/CD redeploys.
+
+**metrics-server rollback:** Remove metrics-server from the cluster. Use Terraform apply/revert approach instead of relying heavily on `terraform destroy -target`.
+
+**HPA rollback:** Remove autoscaling from a service. Deleting the HPA stops automatic scaling, but replica count may need manual adjustment afterward.
+
+**PDB rollback:** Remove disruption protection from a service. Deleting the PDB returns the service to pre-HA maintenance behavior.
+
+**Probe rollback:** Remove startup/readiness/liveness tuning changes. Revert Helm values and redeploy through the normal CI/CD pipeline.
+
+**Replica rollback:** Return service from 2 replicas back to 1. Revert replica count through Helm chart values and redeploy normally.
+
+**Drain recovery:** Recover if node drain gets stuck during M4b. First investigate the real blocking condition before force deleting pods.
+
+**Node recovery:** Recover a node after draining/testing. Use `kubectl uncordon` to make the node schedulable again.
+
+**Load test recovery:** Recover if HPA scaled too high during testing. Stop load generation first and allow HPA stabilization timers to scale down naturally.
+
+**Manual replica recovery:** Recover if replicas remain high after testing. Manually scale deployments back to 2 replicas if needed.
+
+**Rollback limitations:** Operational learning, rescheduled pods, and already-incurred costs remain even after rollback.
+
+**Terraform rollback note:** Prefer reverting Terraform code and re-applying because it is closer to safer production Terraform practices, rather than `terraform destroy -target`.
+
 ## Common operations
 
 _(kubectl shortcuts, Datadog dashboard links, AWS console deep-links)_

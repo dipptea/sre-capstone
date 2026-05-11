@@ -1,10 +1,11 @@
 ---
 phase: 04
 title: HA and scaling
-status: in-progress  # draft | approved | in-progress | blocked | done | abandoned
+status: done  # draft | approved | in-progress | blocked | done | abandoned
 created: 2026-05-08
 approved: 2026-05-08
 started: 2026-05-08
+closed: 2026-05-10
 ---
 
 # Phase 04 — HA and scaling
@@ -473,6 +474,15 @@ Discovered while finding the ALB hostname for M4b's curl loop: `kubectl get ingr
 - **Fix:** set `ingress.enabled: true` and the ACM cert ARN as defaults in `helm/payment/values.yaml`. Chart is now self-contained — no CI-time `--set` overrides needed for ingress. ARNs aren't secrets; pinning in values.yaml is appropriate for the single-environment capstone.
 - **Lesson, sharper:** `--reuse-values` had **two** effects, not one. It blocked new schema additions (the M2 bug we already fixed) AND preserved old user-set values that weren't in chart defaults (the regression we just discovered). Removing it without replacing the second mechanism cost us the ALB. The right pattern: ALL configuration should live in `values.yaml` (committed) or be re-passed via `--set` on every deploy. Never rely on prior-release state.
 - **Production analogue:** this is exactly the kind of silent-deletion incident that gets caught by a synthetic check or external uptime probe — neither of which we have yet (Phase 07 work). For now, manual verification post-M4b that the ALB is reachable.
+- **Follow-up (same day):** restoring `ingress.enabled: true` brought back an ALB, but the Route 53 alias (defined in [infra/acm.tf](../infra/acm.tf) line 86–96) still pointed at the *old* deleted ALB's DNS name — so `payment.payservice.click` returned NXDOMAIN. `data.aws_lb.payment` looks up the ALB by `ingress.k8s.aws/stack=payment/payment` tag, but Terraform's data sources only re-evaluate at plan/apply time. Ran `terraform apply` to refresh the alias to the new ALB's hostname (`...490cbbb298-839711176` → `...490cbbb298-1129335665`). DNS propagation completed in <60s (Route 53 60s TTL on alias records). Lesson: any Terraform-managed resource referencing cluster-created infra (LBC ALBs, IRSA roles, etc.) needs a `terraform apply` after cluster-side state changes — Terraform doesn't auto-detect that the underlying object has been replaced.
+
+**2026-05-09 — M4b drain test: PDB worked, graceful-shutdown gap exposed (~5 brief 502s).**
+Drained `ip-10-0-2-167` with `kubectl drain --ignore-daemonsets --delete-emptydir-data` while T3 hammered `/health` once per second.
+- **PDB behavior (the M4b primary objective): ✓ verified.** Eviction was allowed (`ALLOWED DISRUPTIONS: 1` permitted losing 1 of 2 pods); replacement pod (`payment-7976b86754-z8dfj`) scheduled immediately on the surviving node, became Ready in 6 seconds (startup probe passed on first or second check); ALLOWED DISRUPTIONS dropped to 0 momentarily then recovered to 1 once the replacement was Ready. Drain completed cleanly without hanging. Both pods now co-located on `ip-10-0-1-118` (expected — only schedulable node during drain).
+- **Spec validation strictly failed:** "no 5xx during drain" — T3 captured ~5 `502`s in a ~3-second window during the eviction. PDB had nothing to do with this; PDB controls *whether* eviction is allowed, not the graceful-shutdown handoff between the dying pod and the ALB.
+- **Root cause:** the asymmetry between Service endpoint removal (instant) and ALB target de-registration (seconds). When `payment-5b8nd` got SIGTERM, K8s removed its IP from the Service endpoints immediately. The AWS Load Balancer Controller saw the change and started de-registering the target from the ALB target group, but ALB de-registration takes seconds. During that window, the ALB still routed requests to the dying pod, which had already started closing connections → 502s.
+- **Production fix (deferred to Phase 05 prep or future cleanup):** add a `preStop` lifecycle hook with `sleep 10` (gives ALB time to de-register before the container actually dies) and bump `terminationGracePeriodSeconds: 30` on the Deployment. Both can live in `helm/payment/values.yaml` and the deployment template. Not adding to Phase 04 because it expands scope; Phase 05 will exercise the same code path during chaos drills and naturally surface the need.
+- **Operational footnote:** uncordon the drained node immediately after the drain (`kubectl uncordon ip-10-0-2-167.ec2.internal`). Forgetting halves cluster capacity for future scheduling. Pods don't auto-rebalance — both payment pods stayed on `ip-10-0-1-118` until the next scheduling event.
 
 **2026-05-08 — M2 deploy initially failed: `--reuse-values` blocked the new `probes:` block.**
 First attempt to deploy M2 (helm chart with new `probes:` values block) failed with `nil pointer evaluating interface {}.startup`. Root cause: `.github/workflows/deploy-payment.yml` had `--reuse-values` on the `helm upgrade` command — which tells Helm to ignore the chart's new `values.yaml` and reuse values from the prior release. The prior release had no `probes:` block, so the new templates referencing `.Values.probes.startup.path` rendered against nil.

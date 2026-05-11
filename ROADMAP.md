@@ -2,9 +2,9 @@
 
 ## STATUS
 
-- **Current phase:** 04 — HA and scaling (approved 2026-05-08, M1 next)
-- **Last completed phase:** 03b — Second downstream service + cross-service tracing (closed 2026-05-07)
-- **Last updated:** 2026-05-08
+- **Current phase:** 05 — Failure injection: infrastructure (pending — run `/spec-new 05` to start)
+- **Last completed phase:** 04 — HA and scaling (closed 2026-05-10)
+- **Last updated:** 2026-05-10
 
 _This section is updated by `/spec-new` and `/phase-close`. Manual edits are fine._
 

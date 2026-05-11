@@ -4,7 +4,111 @@ Single canonical view of the **cumulative current system state**. Updated at the
 
 For the *delta* introduced by any given phase (and the failure-mode notes for new components), see that phase's spec under [specs/](specs/).
 
-## Phase 03b — current cumulative state
+## Phase 04 — current cumulative state
+
+End-state of Phase 04: Phase 03b + HA primitives on both services. `metrics-server` is installed in `kube-system` and feeds CPU metrics to per-service HPAs via the `metrics.k8s.io` API. Both `payment-service` and `risk-check-service` now run **2-to-6 replicas behind HPAs** (target 70% CPU), have a **PodDisruptionBudget** (`minAvailable: 1`), and a **three-probe stack** (startup + readiness + liveness on `/health`). The M4b drain test functionally verified PDB; the M6/M7 load tests verified both HPAs scale together (lockstep) under sustained `/pay` traffic, and confirmed cross-service distributed tracing continues to work across multi-pod replicas. **User-facing request path is unchanged from Phase 03b** — the system can now absorb a node drain or a traffic spike without dropping availability.
+
+```mermaid
+flowchart TB
+    user["🌐 Public user"]
+    r53["Route 53<br/>payment.payservice.click<br/>(alias to ALB)"]
+    alb["ALB (Phase 02 — unchanged)"]
+
+    subgraph cluster["EKS cluster · capstone-sre-cluster"]
+        subgraph kubesys["Namespace: kube-system"]
+            ms["🆕 metrics-server<br/>chart 3.12.2 / app 0.7.2<br/>helm_release"]
+            ddA["Datadog agent (DaemonSet — Phase 01)"]
+            lbc["AWS LBC (Phase 02)"]
+        end
+        subgraph payns["Namespace: payment"]
+            payHPA["🆕 HPA<br/>min 2 / max 6 / 70% CPU"]
+            payPDB["🆕 PDB<br/>minAvailable: 1"]
+            payDep["payment Deployment<br/>replicas: 2 (HPA-managed up to 6)<br/>🆕 startup + readiness + liveness probes"]
+            payPods["payment pods (×2–6)"]
+        end
+        subgraph riskns["Namespace: risk-check"]
+            riskHPA["🆕 HPA<br/>min 2 / max 6 / 70% CPU"]
+            riskPDB["🆕 PDB<br/>minAvailable: 1"]
+            riskDep["risk-check Deployment<br/>replicas: 2 (HPA-managed up to 6)<br/>🆕 startup + readiness + liveness probes"]
+            riskPods["risk-check pods (×2–6)"]
+        end
+    end
+
+    ddsaas[("Datadog SaaS<br/>parent-child traces<br/>across multi-pod replicas")]
+
+    user ==>|"HTTPS /pay"| r53
+    r53 ==>|"alias"| alb
+    alb ==>|"forwards"| payPods
+    payPods ==>|"POST /check<br/>via cluster DNS"| riskPods
+
+    ms -.scrapes CPU/mem.-> payPods
+    ms -.scrapes CPU/mem.-> riskPods
+    payHPA -.queries.-> ms
+    riskHPA -.queries.-> ms
+    payHPA -.scales.-> payDep
+    riskHPA -.scales.-> riskDep
+    payPDB -.protects.-> payDep
+    riskPDB -.protects.-> riskDep
+
+    payPods -.->|"parent span"| ddA
+    riskPods -.->|"child span"| ddA
+    ddA --> ddsaas
+
+    classDef new fill:#d4f1d4,stroke:#2d7a2d,stroke-width:2px;
+    class ms,payHPA,payPDB,riskHPA,riskPDB new
+```
+
+### Components by layer (cumulative)
+
+All Phase 01–03b categories carry over unchanged — see [Phase 03b baseline](#phase-03b-baseline-kept-for-comparison) and earlier sections for the full list (Network, Compute, Observability, Application, Public ingress, Deploy automation, Cross-service tracing).
+
+**HA / scaling primitives (Phase 04)**
+- `metrics-server` installed via `helm_release` in [infra/metrics-server.tf](infra/metrics-server.tf) — chart `3.12.2` (app `0.7.2`), `kube-system` namespace. Feeds CPU/memory to HPAs via the `metrics.k8s.io` API. `kubectl top nodes` and `kubectl top pods -A` work because of this.
+- Per-service `HorizontalPodAutoscaler` (`autoscaling/v2`): `minReplicas: 2`, `maxReplicas: 6`, `averageUtilization: 70` on CPU. Same on both `payment` and `risk-check` for lockstep scaling per the spec's Goal.
+- Per-service `PodDisruptionBudget` (`policy/v1`): `minAvailable: 1` on both. Selector matches `app: payment-service` and `app: risk-check-service` respectively. Voluntary-disruption only — does not protect against pod crashes or node hardware failure.
+- Per-service three-probe stack on `/health`:
+  - **startup** probe — period 5s, failureThreshold 6 (30s boot budget). Blocks readiness + liveness during boot; runs once.
+  - **readiness** probe — period 5s, failureThreshold 3 (15s before removal from Service endpoints).
+  - **liveness** probe — period 10s, failureThreshold 6 (60s before kill — deliberately *looser* than readiness, to avoid restart cascades when downstreams are slow).
+- Both services bumped from `replicas: 1` to `replicas: 2` to match HPA `minReplicas` (avoids HPA scaling down to 1 on first reconcile).
+- Helm chart additions: `helm/payment/values.yaml` + `helm/payment/templates/{hpa.yaml,pdb.yaml}`; same shape on `helm/risk-check/`.
+- Public ingress restored to chart defaults (was implicitly held by `--reuse-values`): `ingress.enabled: true` and `certificateArn` are now hardcoded in `helm/payment/values.yaml` instead of being passed via `--set` at install time.
+
+**Helm-install pattern shift (Phase 04 M1)**
+- New cluster addons going forward use the `helm_release` Terraform resource (declarative, drift-detected, supports `terraform plan` showing real diffs on chart version / values changes).
+- Existing addons (Datadog, AWS LBC) remain on the older `null_resource + local-exec` pattern. Migration to `helm_release` is tracked as future cleanup, not Phase 04 scope.
+
+### Request flow
+
+The user-facing path is unchanged from Phase 03b — `curl https://payment.payservice.click/pay` still flows Route 53 → ALB → payment pod → risk-check pod → response. Phase 04 adds **two new control loops inside the cluster** that are not on the user request path but are the whole point of the phase.
+
+**HPA scale-up loop** (runs every ~15 seconds, per HPA):
+1. `metrics-server` scrapes pod CPU/memory from each kubelet's `/metrics/resource` endpoint (every ~15s, in-cluster).
+2. Each HPA reconciles: queries `metrics.k8s.io` for the pods matched by `scaleTargetRef`, computes `desired = ceil(currentReplicas × currentMetric / targetMetric)`.
+3. If `desired > current`, HPA patches the Deployment's `replicas` field.
+4. Deployment controller schedules new pods; the kube-scheduler places them on whichever node has capacity (preferring spread across nodes).
+5. New pod boots → startup probe gates → readiness probe passes (~5–10s after container starts) → pod joins the Service's `endpoints` → ALB target group registers the pod IP.
+6. After load drops, HPA waits for the **scale-down stabilization window (300s default)** of sustained low CPU before removing pods.
+
+**PDB enforcement** (synchronous, on every eviction attempt):
+1. Operator runs `kubectl drain` or the autoscaler issues an eviction.
+2. The Kubernetes Eviction API checks the relevant PDB before approving each pod eviction.
+3. If allowing the eviction would drop ready replicas below `minAvailable` → eviction REJECTED (caller retries until safe).
+4. If allowed → pod evicted; Deployment controller schedules a replacement; `ALLOWED DISRUPTIONS` dynamically updates as pods come and go.
+5. PDB only governs *voluntary* disruption (drain, eviction, cluster upgrade). Involuntary disruption (node hardware failure, kernel panic) ignores PDB by design.
+
+**New failure-modes (Phase 04):**
+
+- **Liveness restart cascade** — if a future change makes the liveness probe call downstream services, a slow downstream causes liveness to fail on every payment pod → kubelet restarts every pod → replacements also can't reach the downstream → restart storm across the entire Deployment. Mitigation: liveness MUST be in-process only. We audited both services' `/health` handlers (both pure in-process at end of Phase 04); any future change touching `/health` should re-check this invariant.
+- **Graceful-shutdown gap (KNOWN, DEFERRED)** — when a payment pod terminates (drain, rolling deploy), the ALB takes ~3-5 seconds to de-register it from the target group. During that window, in-flight requests routed to the dying pod return 502. Observed in M4b drain test (5 × 502 out of ~100 requests). PDB does not address this; the fix is `preStop` lifecycle hook + `terminationGracePeriodSeconds: 30`. Deferred to Phase 05 chaos-drill prep.
+- **HPA hits MAX under sustained load** — observed in M6: payment CPU went to 488% of request, HPA wanted ~14 pods but was capped at `maxReplicas: 6`. Driven by the request-vs-actual mismatch (request 100m, actual idle ~3m, actual under load 488m). Mitigation in production: tune CPU requests after observing real usage (`kubectl top pods` under load); add cluster autoscaler if true MAX is needed; per-service `maxReplicas` bump if appropriate.
+- **Pending pods when HPA exceeds node capacity** — not observed (max=6 chosen to fit on 2× t3.medium with system overhead). Would manifest as `kubectl get pods` showing `Pending` and `kubectl describe pod` showing "0/2 nodes available: insufficient cpu". Mitigation: lower `maxReplicas`, add nodes, or add cluster autoscaler.
+- **metrics-server down** — if metrics-server's pod is down or unhealthy, all HPAs show `TARGETS: <unknown>/70%` and freeze at current replica count (no scale up, no scale down). PDB and probes are independent and continue to work. Diagnostic: `kubectl get deploy -n kube-system metrics-server` and `kubectl top nodes`. Mitigation: `kubectl rollout restart deploy/metrics-server -n kube-system`.
+- **`--reuse-values` footgun (lesson from M2 fix)** — the original CI workflow's `--reuse-values` flag had two effects: (a) blocked new schema additions in `values.yaml` from being picked up, and (b) silently preserved old `--set`-time values (like `ingress.enabled=true`) across deploys. Removing it to fix (a) exposed (b) — Helm reverted `ingress.enabled` to the chart default `false` and silently deleted the public ALB. Mitigation now in place: all configuration is committed to `values.yaml`; `--set` in CI is reserved only for runtime-injected values (image repository + tag).
+
+---
+
+## Phase 03b baseline (kept for comparison)
 
 End-state of Phase 03b: Phase 03 + a second internal service `risk-check-service` that `payment-service` calls synchronously during `/pay`. Datadog APM now shows ONE distributed trace spanning BOTH services with parent-child span relationships — establishes the foundation for Phase 06 downstream-service latency/failure drills. **User-facing request path is unchanged from Phase 02** — `curl https://payment.payservice.click/pay` still hits the ALB → payment pod; the new behavior is invisible to external callers (the response just gains a `risk` field).
 
@@ -393,6 +497,8 @@ End-to-end trace path for a `curl POST /pay` (verified in Phase 01 Milestone 7):
 Maintenance rules live in [`CLAUDE.md`](CLAUDE.md) (hard rule #4 + `/phase-close` flow). This file is updated at phase close — see CLAUDE.md for the full list of phase-close gates.
 
 ## Last updated
+
+2026-05-09 — Phase 04 closed. Added: `metrics-server` (chart 3.12.2 / app 0.7.2) installed via `helm_release` Terraform resource in `kube-system` (NEW Helm-install pattern; Datadog and LBC remain on the older `null_resource + local-exec` pattern, deferred migration). HorizontalPodAutoscaler (`autoscaling/v2`, min 2 / max 6, target 70% CPU) added on both services. PodDisruptionBudget (`policy/v1`, `minAvailable: 1`) added on both services. Three-probe stack (startup + readiness + liveness on `/health`, all parameterized in `values.yaml`) added to both services; existing hardcoded readiness + liveness probes replaced. Both Deployments bumped from `replicas: 1` to `replicas: 2`. Public ingress restored to chart defaults (`ingress.enabled: true` and `certificateArn` now in `values.yaml` instead of being held implicitly by `--reuse-values`); `--reuse-values` removed from `deploy-payment.yml` after M2 deploy failure exposed it. Route 53 alias re-applied via `terraform apply` after Ingress recreation gave the ALB a new DNS name. M4b drain test functionally verified PDB (one payment pod evicted, replacement Ready in ~6s, service stayed up — observed ~5 transient 502s during ALB de-registration window, graceful-shutdown fix deferred to Phase 05). M6 load test (`hey -z 5m -c 50 POST /pay`) confirmed both HPAs scale to MAX (6) within ~12s and back down after the 300s scale-down stabilization window; 25,236 requests with 99.96% 2xx (8 × 500 + 2 × 502 during scale-up window). M7 cross-service trace verification confirmed in Datadog APM — single trace IDs span both `payment-service` and `risk-check-service` across multi-pod replicas. Cumulative cost unchanged (~$160.50/mo).
 
 2026-05-07 — Phase 03b closed. Added: `risk-check-service` (new FastAPI service in `risk-check` namespace, 1 replica, synthetic always-low risk decision); new ECR repo + extended `gh-actions-deployer` inline policy to push both repos; new Helm chart `helm/risk-check/`; new CI/CD workflow `.github/workflows/deploy-risk-check.yml` with path filters for per-service deploy independence; existing `deploy.yml` renamed to `deploy-payment.yml` with symmetric path filters; payment-service modified to call risk-check synchronously via cluster DNS with 2s timeout. Datadog APM now shows distributed parent-child trace across both services. Cumulative cost unchanged (~$160.50/mo).
 
