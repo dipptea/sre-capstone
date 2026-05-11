@@ -69,8 +69,8 @@ pdb:
 # IMPORTANT: terminationGracePeriodSeconds MUST be >= preStopSleep + 5s margin,
 # otherwise kubelet SIGKILLs the pod mid-sleep — worse than no preStop at all.
 gracefulShutdown:
-  preStopSleep: 10                        # 10s covers observed ALB de-reg with 2x margin
-  terminationGracePeriodSeconds: 30       # 10s preStop + ~20s for app to drain in-flight requests
+  preStopSleep: 15                        # bumped 10→15 (M1 retry): 10s left 1 × 502 in drain; 15s should close it
+  terminationGracePeriodSeconds: 30       # 15s preStop + ~15s for app to drain in-flight requests (still well within 30s)
 
 # Ingress (Phase 02). Enabled as chart default in Phase 04 M4b prep — see
 # Decision log 2026-05-09. Previously enabled via `--set ingress.enabled=true`

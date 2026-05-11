@@ -65,5 +65,5 @@ pdb:
 # in this case — risk-check is internal-only, no ALB) to notice the pod is gone
 # before SIGTERM hits. terminationGracePeriodSeconds MUST be >= preStopSleep + 5s.
 gracefulShutdown:
-  preStopSleep: 10
+  preStopSleep: 15                        # bumped 10→15 (mirror payment M1 retry)
   terminationGracePeriodSeconds: 30
