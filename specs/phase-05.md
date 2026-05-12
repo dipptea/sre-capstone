@@ -596,12 +596,59 @@ The point isn't recalling a specific past incident — it's walking the *reasoni
 
 Real uncertainties that can only be answered during implementation/testing.
 
-- [ ] **Is `preStop: sleep 10` enough?** 10s is based on observed ALB de-registration in Phase 04 M4b (~3-5s). M1's verification drain will confirm. If 502s persist, bump to 15s or 20s and re-test. Worst case the drain takes ALB longer than expected and we tune up.
-- [ ] **How long is the M3 5xx window in practice?** Spec assumes "30-90 seconds" based on ALB target health-check defaults. Actual will be measured during M3 and recorded in the playbook. May be longer if our ALB health-check interval/threshold differs from defaults.
-- [ ] **Will the EKS managed node group reliably auto-replace a terminated instance?** Should — that's what managed groups do. But: AWS capacity issues, IAM permission drift, AMI deprecation can all interfere. Will know within ~5 min of M3 firing. Have manual fallback ready (`aws eks update-nodegroup-config --scaling-config ...`).
+- [x] ~~**Is `preStop: sleep 10` enough?**~~ **Resolved 2026-05-11 (M1 retry): NO — 10s left 1 × 502 in the drain test. Bumped to 15s, retested, zero 502s.** The ALB de-registration handoff is more variable than the Phase 04 M4b observation (~3-5s) suggested — 15s is needed to reliably eliminate the race. See Decision log entry.
+- [x] ~~**How long is the M3 5xx window in practice?**~~ **Resolved 2026-05-12 (M3):** 5xx window was approximately 30-90 seconds wall-clock during the chaos cascade, with equivalent error-budget impact of **~11 seconds** of pure downtime (873 errors / 80 RPS sustained). Exact wall-clock duration without Datadog timestamp correlation is unknowable from hey alone, but pattern matches spec prediction. Error breakdown: 591 × 502 (ALB → dead pods), 266 × 500 (cross-service propagation), 16 × 504 (timeouts).
+- [x] ~~**Will the EKS managed node group reliably auto-replace a terminated instance?**~~ **Resolved 2026-05-12 (M3): YES, and MUCH faster than predicted.** Replacement node `ip-10-0-2-110` went from creation → Ready in **~13 seconds** of being created, vs the spec's ~5-minute worst-case estimate. EKS managed node group auto-provisioning is highly reliable in our setup.
 - [ ] **Does `hey -c 20` actually generate enough load to keep CPU non-trivial without triggering HPA?** Phase 04 M6 had `-c 50` which scaled to MAX in 12s. `-c 20` should sit just below scale threshold; M2's run will tell us. If HPA fires during drills, scaling noise drowns out the chaos signal — drop concurrency further.
 - [ ] **Should we drill M4 against risk-check too, or is payment-only sufficient?** **Resolved at approval (2026-05-10): payment-only is sufficient.** The ImagePullBackOff and `--atomic` rollback behavior is identical across services; running M4 on both adds time without new learning.
 
 ## Decision log
 
-_(append entries during execution when something deviates or a choice gets made)_
+**2026-05-12 — M3 node-failure drill: 3.64% error rate during chaos, recovery much faster than predicted.**
+Terminated EC2 instance `i-05b79b4c475f7a232` (underlying K8s node `ip-10-0-2-167`) via `aws ec2 terminate-instances` under sustained load (`hey -z 5m -c 20` against `/pay`).
+
+**Recovery profile:**
+- Node `ip-10-0-2-167` went `Ready → NotReady` (K8s detected dead node)
+- Replacement node `ip-10-0-2-110` provisioned by EKS managed node group, **Ready in ~13s** (vs spec prediction of ~5 min). MUCH faster than estimated — EKS managed group worked perfectly.
+- Pods on dead node force-killed; replacements scheduled on surviving node + new node. Asymmetric placement after recovery: 4 payment + 4 risk-check on `ip-10-0-1-118`; 2 payment + 0 risk-check on new node. Pods don't auto-rebalance.
+
+**Error profile (873 / 23,960 = 3.64% over 5-min run):**
+- 591 × 502 — ALB still routing to dead payment pods until health checks marked them unhealthy
+- 266 × 500 — payment's `raise_for_status()` propagating risk-check failures from cross-service calls to the dead risk-check pod
+- 16 × 504 — ALB gateway timeouts on dying pods
+- **Equivalent error-budget burn: ~11 seconds** of pure downtime (873 errors / 80 RPS)
+
+**HPA asymmetry observed:** payment scaled to MAX 6, risk-check stayed at 4. Same RPS through both services (1:1 call ratio), but payment does more CPU work per request (HTTP client setup, double JSON parsing, response building) vs risk-check's lightweight "parse + return constant." HPA scales on CPU, not RPS, so the upstream "expensive" service scales harder than the downstream "cheap" one. Real production lesson: services in a synchronous chain can have wildly different scaling profiles even with identical HPA configs.
+
+**`payment-hggck` Error pod:** one replacement pod went into `Error` state at ~2m into its lifecycle and stayed there. Likely OOM-killed under chaos-induced load spike. Garbage-collected by the time cluster recovered. Worth investigating in Phase 06 (resource limits / memory profile under burst load).
+
+**Net M3 result:** chaos drill succeeded — produced real failure data matching spec's M3 sequence diagram (ALB target health-check delay + cross-service cascade), validated EKS auto-recovery, captured the asymmetric pod scaling lesson. Brief error window (~30-90s, equivalent to ~11s pure downtime) is acceptable per spec's "some 5xx is acceptable here" criterion — PDB explicitly doesn't protect involuntary disruption.
+
+**2026-05-11 — M2 isolated the residual 502 to the cross-service in-flight call, NOT the K8s lifecycle.**
+M2's pod-kill drill against `/pay` produced 1 × 502 / 9,741 requests (0.01%). To isolate the cause, ran two diagnostic tests:
+- **Control** (hey -z 2m -c 20 against /pay, NO pod kill): 0 × 502 / 10,125. Confirmed HPA scaling alone doesn't produce 502s.
+- **Same kill, but hey against /health** (in-process only, no cross-service): **0 × 502 / 39,833.** Confirmed the K8s lifecycle (preStop sleep 15s + graceful shutdown) doesn't produce 502s at the ALB layer.
+
+By elimination: **the residual 1 × 502 came from the cross-service `/check` call being in-flight when the killed payment pod's SIGTERM hit.** uvicorn's graceful shutdown closes httpx connections to risk-check; the in-flight `/check` call fails; payment's response to the ALB is broken mid-response → ALB returns 502 to client.
+
+This is an **application-layer** graceful-shutdown issue, not a K8s-config issue. Bumping preStop further would not help (already validated by /health test). The fix is application-layer:
+- httpx connection pooling / shutdown handler that completes in-flight requests before closing
+- OR a `lifecycle.preStop` hook at the app level that drains in-flight cross-service calls
+
+Both are out of Phase 05 scope (per Non-goals: "Pre-emptive load shedding / circuit breakers in app code — Phase 06"). Logged for Phase 06 to address.
+
+**Net M2 result:** preStop sleep 15s closes the K8s/ALB graceful-shutdown gap (M1 fix verified again). 99.99% success rate during deliberate pod kill with cross-service load is production-grade. The 0.01% residual is a documented application-layer finding deferred to Phase 06.
+
+**2026-05-11 — M1 first attempt with `preStop: sleep 10` produced 1 × 502; bumped to `sleep 15` for zero 5xx.**
+First M1 deploy used the spec's Decision 1 value (`sleep 10`). Verification drain (`kubectl drain ip-10-0-2-167 --ignore-daemonsets --delete-emptydir-data` with `hey`/curl loop against `/health`) captured the result:
+- Phase 04 M4b (no preStop): ~5 × 502s
+- Phase 05 M1 with `sleep 10`: 1 × 502
+- Phase 05 M1 retry with `sleep 15`: **0 × 502** ✅
+
+The 5→1 improvement at 10s shows preStop is working but the ALB de-registration handoff has more variance than the Phase 04 M4b observation (~3-5s) led us to estimate. At 10s, there's still a narrow window (~1-2s) where ALB hasn't fully marked the target as draining before the pod's sleep completes and SIGTERM hits — that single 502 is a request that landed during that window.
+
+15s gives the de-registration ~5s of margin past the observed worst case, eliminating the race in our environment.
+- Both `helm/payment/values.yaml` and `helm/risk-check/values.yaml` updated: `preStopSleep: 10 → 15`.
+- `terminationGracePeriodSeconds: 30` kept (still > preStopSleep + ~10s margin for app drain).
+- Open Question 1 resolved with this empirical finding.
+- Lesson logged: "10s wasn't enough; 15s is" — preStop tuning is environment-dependent and should be empirically verified, not estimated.

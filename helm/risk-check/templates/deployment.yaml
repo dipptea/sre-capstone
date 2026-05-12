@@ -6,7 +6,12 @@ metadata:
     app: risk-check-service
     version: {{ .Chart.AppVersion | quote }}
 spec:
+  # Phase 05 M4 finding: when HPA is enabled, omit `replicas:` from the manifest
+  # entirely (mirrors payment). HPA owns `.spec.replicas` via the scale subresource;
+  # Helm trying to manage it triggers SSA field-ownership conflicts.
+  {{- if not .Values.hpa.enabled }}
   replicas: {{ .Values.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: risk-check-service

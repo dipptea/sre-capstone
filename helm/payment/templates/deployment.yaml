@@ -6,7 +6,14 @@ metadata:
     app: payment-service
     version: {{ .Chart.AppVersion | quote }}
 spec:
+  # Phase 05 M4 finding: when HPA is enabled, omit `replicas:` from the manifest
+  # entirely. HPA owns `.spec.replicas` via the scale subresource; if Helm also
+  # tries to manage it, Kubernetes SSA detects the field-ownership conflict and
+  # refuses to apply (manifests with: "conflict with kube-controller-manager
+  # subresource scale"). Letting HPA be the sole writer eliminates the conflict.
+  {{- if not .Values.hpa.enabled }}
   replicas: {{ .Values.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: payment-service
