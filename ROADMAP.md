@@ -2,9 +2,9 @@
 
 ## STATUS
 
-- **Current phase:** 05 — Failure injection: infrastructure (approved 2026-05-10, M1 next)
-- **Last completed phase:** 04 — HA and scaling (closed 2026-05-10)
-- **Last updated:** 2026-05-10
+- **Current phase:** 06 — Failure injection: dependencies (pending — run `/spec-new 06` to start)
+- **Last completed phase:** 05 — Failure injection: infrastructure (closed 2026-05-13)
+- **Last updated:** 2026-05-13
 
 _This section is updated by `/spec-new` and `/phase-close`. Manual edits are fine._
 

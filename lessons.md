@@ -237,3 +237,33 @@ Reason:
 CPU requests were too low: Requested: 100m
 Actual usage: ~488m
 So HPA thought traffic was much heavier than expected and aggressively scaled to max pods.
+
+## 2026-05-12 — Phase 05: Chaos drills + graceful-shutdown closure + a real Helm/HPA bug fix
+
+**What I did:**
+
+M1: We added graceful shutdown config — preStop sleep and terminationGracePeriodSeconds — to both payment-service and risk-check-service Deployments. Initially set preStopSleep: 10, retried as preStopSleep: 15 after the first drain test left 1 × 502. With sleep 15, retested with zero 502s.
+
+M2: We killed payment pods and risk-check pods using `kubectl delete pod` while live `/pay` traffic was flowing. After the first /pay test showed 1 × 502, we ran a control test (no kill, same load — zero failures) and a /health test (with kill, no cross-service path — zero failures across 39,833 requests). That isolated the remaining residual 502 as a cross-service in-flight race, not a Kubernetes shutdown issue. Deferred to Phase 06.
+
+M3: We redistributed pods across both worker nodes, then terminated one EC2 worker node using `aws ec2 terminate-instances`. We watched nodes, pods, traffic, HPA recovery, and replacement node creation, and confirmed EKS recovered automatically.
+
+M4: We attempted a bad image deploy via `helm upgrade --set image.tag=nonexistent-deadbeef`. Instead of the expected ImagePullBackOff, we discovered a Helm + HPA Server-Side Apply conflict on `.spec.replicas`. We fixed the chart (conditionally omit `replicas:` when HPA is enabled), committed, pushed, verified CI/CD, then re-ran M4. Final result: ErrImagePull → ImagePullBackOff → Helm `--atomic` rollback → healthy pods restored → 0 user errors.
+
+**What surprised me / what I got wrong:**
+
+M1 surprise: preStopSleep: 10 improved the drain issue but still gave 1 × 502. Expected: 0 errors. Actual: 1 × 502.
+
+M2 surprise (pod kill): Even with graceful shutdown working, /pay still showed 1 × 502 during pod kill. Then /health showed 0 errors out of 39,833 requests. So the surprise was: the remaining 502 was not Kubernetes/ALB shutdown — it was likely the /pay → /check cross-service path.
+
+M3 surprise (EC2 terminate): EKS replaced the failed node very fast. Expected: maybe 3–5 minutes. Actual: replacement node Ready very quickly (~13 seconds). Also, node failure produced mixed errors: 500, 502, 504.
+
+M4 surprise: The broken image test did NOT fail first with ImagePullBackOff. Instead, it first failed because of Helm + HPA conflict on `.spec.replicas`. This exposed a real production bug.
+
+**How I'd explain it to a peer:**
+
+First, we implemented graceful shutdown improvements for both services by increasing preStopSleep from 10 seconds to 15 seconds and configuring terminationGracePeriodSeconds. The goal was to prevent the ALB from routing traffic to pods that were already shutting down or being drained during rolling updates and pod termination.
+
+Next, we performed a pod-kill drill. During live /pay traffic, we intentionally deleted a payment-service pod. We observed a single 502 error during the test. To determine whether the issue was caused by Kubernetes/ALB shutdown behavior or by the application dependency flow, we ran additional validation tests. We generated traffic against /health while deleting pods again, and this produced zero failures. That confirmed the graceful shutdown logic was working correctly and the earlier 502 was most likely related to the /pay → risk-check-service cross-service request path during in-flight shutdown.
+
+After that, we performed a node failure drill by forcefully terminating an EC2 worker node participating in the EKS cluster. During the test, we continuously monitored nodes, pods, autoscaling behavior, replacement node creation, and live /pay traffic using hey. EKS successfully replaced the failed node automatically, and Kubernetes rescheduled workloads onto healthy nodes. During the disruption window, we observed mixed application and infrastructure errors including 500, 502, and 504 responses, which is expected during hard node failures because pods disappear abruptly without graceful draining.

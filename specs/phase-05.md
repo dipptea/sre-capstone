@@ -1,10 +1,11 @@
 ---
 phase: 05
 title: Failure injection — infrastructure
-status: in-progress  # draft | approved | in-progress | blocked | done | abandoned
+status: done  # draft | approved | in-progress | blocked | done | abandoned
 created: 2026-05-10
 approved: 2026-05-10
 started: 2026-05-10
+closed: 2026-05-13
 ---
 
 # Phase 05 — Failure injection: infrastructure

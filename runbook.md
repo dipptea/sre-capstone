@@ -1266,15 +1266,129 @@ _(kubectl shortcuts, Datadog dashboard links, AWS console deep-links)_
 
 ## Incident playbooks
 
-_(one section per failure mode, populated during failure-injection phases)_
+Built from Phase 05 chaos drills (M2/M3/M4). Each entry follows: first signal → how to confirm → automated vs manual recovery → observed time-to-recovery → escalation criteria.
 
-- [ ] Pod crashloop
-- [ ] Node drained / unschedulable
-- [ ] Image pull failure
-- [ ] DB latency spike
-- [ ] Downstream service slow
-- [ ] WAF blocking legitimate traffic
-- [ ] Datadog agent not reporting
+### Playbook: Pod crashloop / pod kill (from M2)
+
+**First signal**
+- Datadog APM: brief blip in pod count widget; latency stays flat; no error spike at the dashboard level
+- `kubectl get pods -n <ns>` shows one or more pods in `Terminating` state, replacement appearing as `Pending` → `ContainerCreating` → `Running`
+- hey / curl loop: mostly 200s; occasionally a single 502 if a cross-service `/check` call was in-flight when the pod started shutting down (residual application-layer race, Phase 06 work)
+
+**How to confirm cause**
+- `kubectl describe pod -n <ns> <name>` — look at the Events section for "Killing", restart counts, OOMKilled
+- `kubectl get events --sort-by=.lastTimestamp -n <ns>` — recent eviction or termination reasons
+
+**Automated vs manual recovery**
+- Deployment notices replica count dropped (desired = 2, current = 1) and immediately creates a replacement pod.
+- Scheduler assigns the new pod; new pod lifecycle: Pending → ContainerCreating → Running → Ready.
+- Pod shutdown sequence (with M1's preStop fix in place): SIGTERM signal → preStop sleep 15s runs (gives ALB time to de-register the pod from its target group) → SIGTERM hits the app → uvicorn graceful shutdown (in-flight requests complete) → SIGKILL fallback at terminationGracePeriodSeconds (30s).
+- Only after readiness probe passes does ALB start routing traffic to the new pod.
+- **No human action needed for single pod kills.**
+
+**Time-to-recovery (observed)**
+~6 seconds for replacement pod to reach Ready and rejoin Service endpoints.
+
+**Escalation criteria**
+- Replacement pod stays `Pending` > 2 minutes → page (likely node capacity or scheduling issue)
+- Multiple consecutive pod kills (CrashLoopBackOff pattern on >50% of pods) → page (likely application bug or config issue)
+- Restart count climbing across all pods of a service → page (likely liveness probe too aggressive, downstream cascade)
+
+**Cross-reference:** `lessons.md` Phase 05 entry — 0.01% residual 5xx during pod kill comes from the cross-service `/check` call being in-flight when SIGTERM hits the payment pod. Application-layer graceful shutdown (uvicorn closes connections during in-flight requests) is the root cause. Fix is application-level (Phase 06).
+
+---
+
+### Playbook: Node drained / unschedulable / lost (from M3)
+
+**First signal**
+- Datadog APM: error rate spike, pod count drop, host count drop — multiple signals move at once
+- `kubectl get nodes` shows a node in `NotReady` state
+- hey / curl loop: brief 502/500/504 window (30-90 seconds typical)
+
+**How to confirm cause**
+
+Distinguish between three different "node gone" scenarios — they recover differently:
+
+| Scenario | Detection | Auto-replace? |
+|---|---|---|
+| `kubectl drain` (voluntary, PDB applies) | Node is `Ready,SchedulingDisabled`; pods migrate one-by-one | No — node still exists, just unschedulable |
+| `aws ec2 terminate-instances` (involuntary, PDB ignored) | Node disappears from `kubectl get nodes` after ~5 min, then EKS provisions replacement | Yes — managed node group auto-provisions |
+| `kubectl delete node` (rare; manual cleanup) | Node removed from K8s, EC2 may still be running | No — manual EC2 management required |
+
+Diagnostic commands:
+- `kubectl get nodes` — which node, what status
+- `kubectl get pods -A -o wide` — which pods were on the affected node
+- `aws ec2 describe-instances --profile capstone-admin --instance-ids <i-xxx>` — instance state (terminated, stopped, running)
+- `aws eks describe-nodegroup --cluster-name capstone-sre-cluster --nodegroup-name <name> --profile capstone-admin` — scaling activity errors
+
+**Automated vs manual recovery**
+- EKS managed node group provisions replacement EC2 instance (in our drill: ~13 seconds from terminate → new node Ready).
+- Deployment controller reschedules pods on surviving + new node.
+- HPA may also create additional pods on surviving nodes if CPU pressure is high under continuing load.
+- **PDB does NOT help here.** PDB only governs voluntary disruption (Eviction API used by `kubectl drain`). Force-terminating a node bypasses the eviction path entirely.
+
+**Time-to-recovery (observed)**
+- Replacement node Ready: ~13 seconds
+- ALB target health-check propagation (502 window stops): 30-90 seconds
+- Full recovery (pods rescheduled, all endpoints healthy): 1-2 minutes
+
+**Expected user-visible impact during the chaos window:**
+- ~3.6% error rate over a 5-minute load test (873 / 23,960 requests)
+- Error breakdown: 591 × 502 (ALB still routing to dead pods), 266 × 500 (cross-service propagation: payment → dead risk-check → exception → 500), 16 × 504 (gateway timeouts)
+- Equivalent error-budget burn: ~11 seconds of pure downtime at 80 RPS
+
+**Escalation criteria**
+- Replacement node fails to provision within 5 min → page (check AWS capacity, IAM, AMI deprecation)
+- Same scenario repeats on >1 node → page (likely capacity / cost issue or hardware pattern)
+- Error rate stays above 1% for >5 minutes after node Ready → page (something else is wrong, not just node failure)
+
+**Cross-reference:** `lessons.md` Phase 05 entry — drain vs terminate vs delete distinction; PDB scope (voluntary only); HPA scaling asymmetry between payment and risk-check (different CPU per request → different replica counts under same RPS).
+
+---
+
+### Playbook: Image pull failure / bad deploy (from M4)
+
+**First signal**
+- Datadog APM: **zero impact at the user level** — old pods keep serving traffic
+- `kubectl get pods -n <ns>` shows a new pod in `ImagePullBackOff` (or transiently `ErrImagePull`)
+- CI/CD pipeline: `helm upgrade --atomic --timeout 5m` fails with `context deadline exceeded`
+- Helm release history: latest revision shows `failed` status
+
+**How to confirm cause**
+- `kubectl describe pod -n <ns> <bad-pod-name>` — Events section shows "Failed to pull image" with specific error (typically "manifest not found" or "no such image")
+- `kubectl get pods -n <ns>` — confirm new pod status `ImagePullBackOff`, old pods still `Running`
+- `helm history <release> -n <ns>` — see whether automatic rollback fired
+- Common causes:
+  - Image tag doesn't exist in ECR (typo, deleted by lifecycle policy, wrong commit hash)
+  - ECR auth failure (IAM permission drift, expired credentials)
+  - Network issue between worker nodes and ECR (rare, NAT GW problem)
+
+**Automated vs manual recovery**
+- `helm upgrade --atomic --timeout 5m` waits 5 minutes for new pod to become Ready (it won't, because image pull is failing).
+- After timeout, Helm automatically rolls back to the previous good Deployment revision.
+- Old pods keep serving throughout the entire failure window — **zero user-visible impact**.
+- New (broken) pods get deleted as part of rollback; broken ReplicaSet scaled to zero.
+
+**Time-to-recovery (observed)**
+- 5 minutes total (Helm's `--timeout` value).
+- Service availability: ~100% throughout (8,450 / 8,450 = 100% 200s in M4's load test during the failed deploy).
+- If you want faster recovery, reduce `--timeout` to 2-3 minutes (faster failure detection at the cost of less time for slow legitimate deploys).
+
+**Escalation criteria**
+- Helm rollback also fails (e.g., SSA conflict, RBAC issue) → page (Helm + cluster state is now inconsistent; needs manual investigation)
+- ImagePullBackOff persists after rollback (still happens on old image too) → page (might be an ECR-wide auth or network problem)
+- Repeated bad-image deploys from the same commit → check CI/CD pipeline (something is pushing a tag that doesn't exist)
+
+**Cross-reference:** `lessons.md` Phase 05 entry — Helm + HPA SSA field-ownership bug found during M4 (Helm tries to manage `.spec.replicas` while HPA already owns it via the scale subresource). Fix: conditionally omit `replicas:` from Deployment template when HPA is enabled — `{{- if not .Values.hpa.enabled }} replicas: {{ .Values.replicas }} {{- end }}`. Real production bug surfaced by chaos drill.
+
+---
+
+### Future playbooks (Phase 06+ work)
+
+- [ ] DB latency spike — Phase 06 (downstream/dependency failures)
+- [ ] Downstream service slow — Phase 06
+- [ ] WAF blocking legitimate traffic — Phase 07
+- [ ] Datadog agent not reporting — observability failure mode
 
 ## Useful queries
 

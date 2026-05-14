@@ -4,7 +4,112 @@ Single canonical view of the **cumulative current system state**. Updated at the
 
 For the *delta* introduced by any given phase (and the failure-mode notes for new components), see that phase's spec under [specs/](specs/).
 
-## Phase 04 — current cumulative state
+## Phase 05 — current cumulative state
+
+End-state of Phase 05: Phase 04 + **graceful-shutdown closure + 3 chaos drills + runbook playbooks + 1 production bug fix in code**. Both `payment-service` and `risk-check-service` now have `preStop: sleep 15` + `terminationGracePeriodSeconds: 30` to close the M4b drain-test 502 gap from Phase 04. A subtle Helm + HPA Server-Side Apply field-ownership bug was discovered (and fixed in code) during M4: the Deployment template now conditionally omits `replicas:` when HPA is enabled, eliminating the SSA conflict between Helm and `kube-controller-manager`. **No new AWS resources, no new runtime components** — Phase 05 was a *resilience-validation* phase. The architecture diagram below is materially identical to Phase 04; the changes are configuration-level on existing components.
+
+```mermaid
+flowchart TB
+    user["🌐 Public user"]
+    r53["Route 53<br/>payment.payservice.click<br/>(alias to ALB)"]
+    alb["ALB (Phase 02 — unchanged)"]
+
+    subgraph cluster["EKS cluster · capstone-sre-cluster"]
+        subgraph kubesys["Namespace: kube-system"]
+            ms["metrics-server (Phase 04)"]
+            ddA["Datadog agent (DaemonSet — Phase 01)"]
+            lbc["AWS LBC (Phase 02)"]
+        end
+        subgraph payns["Namespace: payment"]
+            payHPA["HPA min 2 / max 6 / 70% CPU (Phase 04)"]
+            payPDB["PDB minAvailable: 1 (Phase 04)"]
+            payDep["payment Deployment<br/>replicas: HPA-managed (2–6)<br/>🆕 preStop: sleep 15<br/>🆕 terminationGracePeriodSeconds: 30<br/>🆕 replicas: field omitted from chart when HPA enabled<br/>startup + readiness + liveness probes (Phase 04)"]:::changed
+            payPods["payment pods (×2–6)"]
+        end
+        subgraph riskns["Namespace: risk-check"]
+            riskHPA["HPA min 2 / max 6 / 70% CPU (Phase 04)"]
+            riskPDB["PDB minAvailable: 1 (Phase 04)"]
+            riskDep["risk-check Deployment<br/>replicas: HPA-managed (2–6)<br/>🆕 preStop: sleep 15<br/>🆕 terminationGracePeriodSeconds: 30<br/>🆕 replicas: field omitted from chart when HPA enabled<br/>startup + readiness + liveness probes (Phase 04)"]:::changed
+            riskPods["risk-check pods (×2–6)"]
+        end
+    end
+
+    ddsaas[("Datadog SaaS")]
+
+    user ==>|"HTTPS /pay"| r53
+    r53 ==>|"alias"| alb
+    alb ==>|"forwards"| payPods
+    payPods ==>|"POST /check<br/>via cluster DNS"| riskPods
+
+    ms -.scrapes CPU/mem.-> payPods
+    ms -.scrapes CPU/mem.-> riskPods
+    payHPA -.queries.-> ms
+    riskHPA -.queries.-> ms
+    payHPA -.scales.-> payDep
+    riskHPA -.scales.-> riskDep
+    payPDB -.protects.-> payDep
+    riskPDB -.protects.-> riskDep
+
+    payPods -.->|"parent span"| ddA
+    riskPods -.->|"child span"| ddA
+    ddA --> ddsaas
+
+    classDef changed fill:#fff4d4,stroke:#a07d2d,stroke-width:2px;
+```
+
+### Components by layer (cumulative)
+
+All Phase 01–04 categories carry over unchanged — see [Phase 04 baseline](#phase-04-baseline-kept-for-comparison) and earlier sections for the full list. Phase 05 adds:
+
+**Graceful shutdown configuration (Phase 05 M1)**
+- Both `payment-service` and `risk-check-service` Deployment pods now have:
+  - `lifecycle.preStop.exec.command: ["sh", "-c", "sleep 15"]` — 15-second pause before SIGTERM, gives the ALB time to de-register the pod from its target group BEFORE the application starts shutting down. Closes the Phase 04 M4b 502 gap.
+  - `terminationGracePeriodSeconds: 30` — total grace period for the pod to exit, must be ≥ preStopSleep + margin for app drain.
+- Parameterized via `gracefulShutdown.preStopSleep` and `gracefulShutdown.terminationGracePeriodSeconds` in `values.yaml`. Initially set to 10s, bumped to 15s after M1 retest (10s left 1 × 502; 15s closes the gap cleanly).
+
+**Helm chart fix for HPA compatibility (Phase 05 M4 — production bug fix in code)**
+- Discovered during M4: when a Deployment is HPA-managed, Helm trying to set `.spec.replicas` in its manifest triggers a Kubernetes Server-Side Apply (SSA) field-ownership conflict with `kube-controller-manager` (which owns `.spec.replicas` via the scale subresource). Symptom: `helm upgrade` fails with "conflict with kube-controller-manager subresource scale". Worse: the rollback fails the same way, leaving the helm release in a `failed` state.
+- **Fix:** both `helm/payment/templates/deployment.yaml` and `helm/risk-check/templates/deployment.yaml` now conditionally omit `replicas:` when `hpa.enabled` is true:
+  ```yaml
+  spec:
+  {{- if not .Values.hpa.enabled }}
+    replicas: {{ .Values.replicas }}
+  {{- end }}
+  ```
+- HPA becomes the sole writer of `.spec.replicas`; SSA has no conflict possible. Future deploys (including any chaos-drill helm operations) succeed cleanly.
+
+**Operational playbooks (Phase 05 M5)**
+- `runbook.md` now has fleshed-out incident playbooks for the three failure modes drilled in Phase 05:
+  - Pod crashloop / pod kill (from M2)
+  - Node drained / unschedulable / lost (from M3)
+  - Image pull failure / bad deploy (from M4)
+- Each playbook includes: first signal, how to confirm, automated-vs-manual recovery distinction, observed time-to-recovery, escalation criteria.
+
+### Request flow
+
+The user-facing path is unchanged from Phase 04. Phase 05 adds **one new control loop** worth naming:
+
+**Graceful shutdown sequence on pod termination** (now active on every payment + risk-check pod):
+1. Kubernetes signals pod termination (drain, eviction, rolling deploy, `kubectl delete pod`)
+2. Service endpoints are immediately updated to remove the pod's IP — Kubernetes-side update is instantaneous
+3. `preStop` hook runs: `sleep 15` — pod stays alive but is no longer in Service endpoints
+4. **In parallel:** AWS LBC notices the endpoint change and instructs the ALB to de-register the pod's IP from the target group. ALB de-registration completes within seconds.
+5. After preStop sleep finishes, kubelet sends SIGTERM to the application
+6. uvicorn graceful shutdown: in-flight requests are allowed to complete (within the `terminationGracePeriodSeconds: 30` window)
+7. Application exits cleanly; pod terminates
+
+The 15-second preStop sleep ensures step 4 completes before step 5 — no traffic is routed to the pod after it starts shutting down.
+
+**New failure-modes (Phase 05 — observed during drills, documented in runbook playbooks):**
+
+- **Application-layer cross-service in-flight race** (M2 finding) — `kubectl delete pod` on a payment pod that's mid-call to risk-check produces ~0.01% 502 rate due to uvicorn closing httpx connections during graceful shutdown. Deferred to Phase 06 (application-level shutdown handler).
+- **Involuntary node disruption** (M3 finding) — `aws ec2 terminate-instances` produces a 30-90s window of 5xx (~3.6% error rate during a 5-min load test) while ALB detects dead targets via health checks. PDB does NOT protect this. EKS managed node group auto-provisions a replacement in ~13s.
+- **Helm + HPA SSA conflict** (M4 finding) — already fixed in code via conditional `replicas:` rendering. The fix is now part of the chart.
+- **Asymmetric scaling under cross-service load** (M3 observation) — services in a synchronous chain can have wildly different HPA-managed replica counts. Payment (more CPU per request) scales to MAX 6; risk-check (lighter per request) stays at 4 under same RPS. HPA scales on CPU, not RPS.
+
+---
+
+## Phase 04 baseline (kept for comparison)
 
 End-state of Phase 04: Phase 03b + HA primitives on both services. `metrics-server` is installed in `kube-system` and feeds CPU metrics to per-service HPAs via the `metrics.k8s.io` API. Both `payment-service` and `risk-check-service` now run **2-to-6 replicas behind HPAs** (target 70% CPU), have a **PodDisruptionBudget** (`minAvailable: 1`), and a **three-probe stack** (startup + readiness + liveness on `/health`). The M4b drain test functionally verified PDB; the M6/M7 load tests verified both HPAs scale together (lockstep) under sustained `/pay` traffic, and confirmed cross-service distributed tracing continues to work across multi-pod replicas. **User-facing request path is unchanged from Phase 03b** — the system can now absorb a node drain or a traffic spike without dropping availability.
 
@@ -497,6 +602,8 @@ End-to-end trace path for a `curl POST /pay` (verified in Phase 01 Milestone 7):
 Maintenance rules live in [`CLAUDE.md`](CLAUDE.md) (hard rule #4 + `/phase-close` flow). This file is updated at phase close — see CLAUDE.md for the full list of phase-close gates.
 
 ## Last updated
+
+2026-05-12 — Phase 05 closed. Added: `lifecycle.preStop.exec.command: ["sh", "-c", "sleep 15"]` and `terminationGracePeriodSeconds: 30` on both `payment-service` and `risk-check-service` Deployments (parameterized via `gracefulShutdown.preStopSleep` and `gracefulShutdown.terminationGracePeriodSeconds` in `values.yaml`); initial value `sleep 10` retried to `sleep 15` after the first drain test left 1 × 502 in the curl loop. Chart fix: conditional `replicas:` rendering in both `helm/payment/templates/deployment.yaml` and `helm/risk-check/templates/deployment.yaml` — when `hpa.enabled` is true, the `replicas:` field is omitted from the rendered manifest, eliminating the Kubernetes Server-Side Apply field-ownership conflict between Helm and HPA (`kube-controller-manager` via the scale subresource). Surfaced + fixed during M4. Three chaos drills run: M2 pod-kill drill (graceful, 99.99% success, 0.01% residual deferred to Phase 06), M3 node-terminate drill (real EC2 termination, ~13s for EKS managed group to provision replacement, 3.64% error rate during 5-min load — within spec's "some 5xx is acceptable" criterion since PDB doesn't protect involuntary disruption), M4 image-pull failure drill (`helm upgrade --set image.tag=nonexistent-deadbeef` → ImagePullBackOff → `--atomic` rolled back to previous good revision → zero user-visible impact). `runbook.md` now has incident playbooks for pod crashloop, node drained/lost, image pull failure. **Cumulative cost unchanged at ~$160.50/mo** — Phase 05 added $0 of new AWS resources (no new EC2, no new ALB, no new networking). All changes are Kubernetes-level chart additions.
 
 2026-05-09 — Phase 04 closed. Added: `metrics-server` (chart 3.12.2 / app 0.7.2) installed via `helm_release` Terraform resource in `kube-system` (NEW Helm-install pattern; Datadog and LBC remain on the older `null_resource + local-exec` pattern, deferred migration). HorizontalPodAutoscaler (`autoscaling/v2`, min 2 / max 6, target 70% CPU) added on both services. PodDisruptionBudget (`policy/v1`, `minAvailable: 1`) added on both services. Three-probe stack (startup + readiness + liveness on `/health`, all parameterized in `values.yaml`) added to both services; existing hardcoded readiness + liveness probes replaced. Both Deployments bumped from `replicas: 1` to `replicas: 2`. Public ingress restored to chart defaults (`ingress.enabled: true` and `certificateArn` now in `values.yaml` instead of being held implicitly by `--reuse-values`); `--reuse-values` removed from `deploy-payment.yml` after M2 deploy failure exposed it. Route 53 alias re-applied via `terraform apply` after Ingress recreation gave the ALB a new DNS name. M4b drain test functionally verified PDB (one payment pod evicted, replacement Ready in ~6s, service stayed up — observed ~5 transient 502s during ALB de-registration window, graceful-shutdown fix deferred to Phase 05). M6 load test (`hey -z 5m -c 50 POST /pay`) confirmed both HPAs scale to MAX (6) within ~12s and back down after the 300s scale-down stabilization window; 25,236 requests with 99.96% 2xx (8 × 500 + 2 × 502 during scale-up window). M7 cross-service trace verification confirmed in Datadog APM — single trace IDs span both `payment-service` and `risk-check-service` across multi-pod replicas. Cumulative cost unchanged (~$160.50/mo).
 
